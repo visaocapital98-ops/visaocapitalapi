@@ -1,0 +1,13 @@
+# Node modules
+node_modules/
+
+# Environment variables (private credentials)
+.env
+
+# Local uploads (ficheiros de utilizadores)
+uploads/*
+!uploads/.gitkeep
+
+# OS metadata
+Thumbs.db
+Desktop.ini

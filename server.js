@@ -12,25 +12,12 @@ const app = express();
 const port = process.env.PORT || 3000;
 
 // ============================================================
-// CORS — Permite que o frontend (qualquer domínio em dev,
-// ou o domínio real em produção) aceda à API.
-// Defina FRONTEND_URL no .env em produção para restringir.
+// CORS — Permite pedidos de qualquer origem.
+// Não usamos cookies (tokens via headers), por isso não
+// precisamos de credentials:true, o que é incompatível com *.
 // ============================================================
-const allowedOrigins = process.env.FRONTEND_URL
-  ? process.env.FRONTEND_URL.split(',').map(o => o.trim())
-  : ['http://localhost:3000', 'http://127.0.0.1:5500', 'http://localhost:5500'];
-
-app.use(cors({
-  origin: function (origin, callback) {
-    // Permitir pedidos sem origin (ex: Postman, curl, mobile apps)
-    if (!origin) return callback(null, true);
-    if (allowedOrigins.includes(origin) || allowedOrigins.includes('*')) {
-      return callback(null, true);
-    }
-    return callback(new Error('Origem não permitida pelo CORS: ' + origin));
-  },
-  credentials: true
-}));
+app.use(cors());
+app.options('*', cors()); // Responder a todos os preflight OPTIONS
 
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
@@ -898,8 +885,7 @@ app.post('/api/admin/notifications', adminAuth, async (req, res) => {
   }
 });
 
-// Iniciar Servidor
-app.listen(port, () => {
-  console.log(`API Visão Capital a correr em http://localhost:${port}`);
-  console.log(`Origens permitidas: ${allowedOrigins.join(', ')}`);
+// Iniciar Servidor — escutar em 0.0.0.0 para funcionar no Railway
+app.listen(port, '0.0.0.0', () => {
+  console.log(`API Visão Capital a correr na porta ${port}`);
 });

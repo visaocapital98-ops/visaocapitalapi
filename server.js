@@ -222,15 +222,25 @@ app.post('/api/orders', upload.fields([
     const comprovativoPath = '/uploads/' + comprovativoFile.filename;
     const comprovativoName = comprovativoFile.originalname;
 
-    // Inserir pedido
+    // Extrair todos os campos do formulário (exceto os campos de controlo)
+    const camposExcluidos = ['cliente_nome','cliente_tel','service_id','service_name','valor','afiliado'];
+    const detalhesObj = {};
+    for (const [key, val] of Object.entries(req.body)) {
+      if (!camposExcluidos.includes(key) && val && val.toString().trim() !== '') {
+        detalhesObj[key] = val;
+      }
+    }
+    const detalhesJSON = Object.keys(detalhesObj).length > 0 ? JSON.stringify(detalhesObj) : null;
+
+    // Inserir pedido com detalhes
     await pool.query(
       `INSERT INTO orders 
-      (id, date, date_time, cliente, contacto, servico, service_id, valor, afiliado, estado, comprovativo_path, comprovativo_name) 
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'novo', ?, ?)`,
+      (id, date, date_time, cliente, contacto, servico, service_id, valor, afiliado, estado, detalhes, comprovativo_path, comprovativo_name) 
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'novo', ?, ?, ?)`,
       [
         orderId, date, dateTime, cliente_nome, cliente_tel, 
-        service_name, service_id, valor, afiliado || null, 
-        comprovativoPath, comprovativoName
+        service_name, service_id, valor, afiliado || null,
+        detalhesJSON, comprovativoPath, comprovativoName
       ]
     );
 
@@ -520,7 +530,7 @@ app.post('/api/affiliates/withdraw', affiliateAuth, async (req, res) => {
 // Dashboard geral do Admin
 app.get('/api/admin/dashboard', adminAuth, async (req, res) => {
   try {
-    const [orders] = await pool.query('SELECT id, date, cliente, contacto, servico, valor, afiliado, estado, comprovativo_path FROM orders ORDER BY date_time DESC');
+    const [orders] = await pool.query('SELECT id, date, cliente, contacto, servico, valor, afiliado, estado, detalhes, comprovativo_path, comprovativo_name FROM orders ORDER BY date_time DESC');
     const [afs] = await pool.query('SELECT id FROM affiliates');
     const [setRows] = await pool.query('SELECT setting_value FROM settings WHERE setting_key = "commission"');
     const commRate = parseInt(setRows[0]?.setting_value || '25') / 100;

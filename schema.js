@@ -86,11 +86,21 @@ async function initializeDatabase() {
         afiliado VARCHAR(50) DEFAULT NULL,
         estado VARCHAR(20) NOT NULL DEFAULT 'novo',
         observacoes TEXT DEFAULT NULL,
+        detalhes LONGTEXT DEFAULT NULL,
         comprovativo_path VARCHAR(255) DEFAULT NULL,
         comprovativo_name VARCHAR(255) DEFAULT NULL
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     `);
     console.log('Tabela "orders" verificada/criada.');
+
+    // Adicionar coluna detalhes se ainda nao existir (para bases de dados ja existentes)
+    try {
+      await connection.query(`ALTER TABLE orders ADD COLUMN detalhes LONGTEXT DEFAULT NULL`);
+      console.log('Coluna "detalhes" adicionada à tabela orders.');
+    } catch (e) {
+      if (e.code !== 'ER_DUP_FIELDNAME') throw e;
+      // Coluna ja existe, ignorar
+    }
 
     // 6. Tabela Order Files
     await connection.query(`

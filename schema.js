@@ -160,11 +160,42 @@ async function initializeDatabase() {
     await connection.query(`
       CREATE TABLE IF NOT EXISTS notifications (
         id VARCHAR(50) PRIMARY KEY,
+        titulo VARCHAR(255) DEFAULT 'Notificação',
         message TEXT NOT NULL,
+        tipo VARCHAR(50) DEFAULT 'geral',
+        destinatario VARCHAR(50) DEFAULT 'todos',
         date DATE NOT NULL
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     `);
     console.log('Tabela "notifications" verificada/criada.');
+
+    // Adicionar colunas se ainda nao existirem (para base de dados ja existente)
+    const columnsToModify = [
+      { name: 'titulo', type: "VARCHAR(255) DEFAULT 'Notificação'" },
+      { name: 'tipo', type: "VARCHAR(50) DEFAULT 'geral'" },
+      { name: 'destinatario', type: "VARCHAR(50) DEFAULT 'todos'" }
+    ];
+    for (const col of columnsToModify) {
+      try {
+        await connection.query(`ALTER TABLE notifications ADD COLUMN ${col.name} ${col.type}`);
+        console.log(`Coluna "${col.name}" adicionada à tabela notifications.`);
+      } catch (e) {
+        if (e.code !== 'ER_DUP_FIELDNAME') throw e;
+      }
+    }
+
+    // 11. Tabela Notification Reads (para saber se o afiliado ja leu a notificacao)
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS notification_reads (
+        notification_id VARCHAR(50) NOT NULL,
+        affiliate_id VARCHAR(50) NOT NULL,
+        read_date DATETIME NOT NULL,
+        PRIMARY KEY (notification_id, affiliate_id),
+        FOREIGN KEY (notification_id) REFERENCES notifications(id) ON DELETE CASCADE,
+        FOREIGN KEY (affiliate_id) REFERENCES affiliates(id) ON DELETE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    `);
+    console.log('Tabela "notification_reads" verificada/criada.');
 
 
     // --- INSERÇÃO DE DADOS PADRÃO ---

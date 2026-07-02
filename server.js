@@ -883,12 +883,104 @@ app.delete('/api/admin/services/:id', adminAuth, async (req, res) => {
 
 // Enviar Notificação aos Afiliados (Admin)
 app.post('/api/admin/notifications', adminAuth, async (req, res) => {
-  const { message } = req.body;
+  const { message, titulo, tipo, destinatario } = req.body;
   if (!message) return res.status(400).json({ error: 'Mensagem obrigatória' });
   try {
     const id = 'N' + Date.now();
     const date = new Date().toISOString().slice(0, 10);
-    await pool.query('INSERT INTO notifications (id, message, date) VALUES (?, ?, ?)', [id, message, date]);
+    await pool.query(
+      'INSERT INTO notifications (id, titulo, message, tipo, destinatario, date) VALUES (?, ?, ?, ?, ?, ?)',
+      [id, titulo || 'Notificação', message, tipo || 'geral', destinatario || 'todos', date]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Listar todas as notificações enviadas (Admin)
+app.get('/api/admin/notifications', adminAuth, async (req, res) => {
+  try {
+    const [rows] = await pool.query('SELECT * FROM notifications ORDER BY date DESC, id DESC');
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Eliminar Notificação (Admin)
+app.delete('/api/admin/notifications/:id', adminAuth, async (req, res) => {
+  try {
+    await pool.query('DELETE FROM notifications WHERE id = ?', [req.params.id]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Ranking de Afiliados (Admin)
+app.get('/api/admin/affiliates/ranking', adminAuth, async (req, res) => {
+  try {
+    const [afs] = await pool.query(
+      'SELECT id, nome, code, foto_path, date_joined FROM affiliates'
+    );
+    const [orders] = await pool.query('SELECT valor, afiliado FROM orders WHERE estado = "concluido" AND afiliado IS NOT NULL');
+    const [setRows] = await pool.query('SELECT setting_value FROM settings WHERE setting_key = "commission"');
+    const commRate = parseInt(setRows[0]?.setting_value || '25') / 100;
+
+    const ranking = afs.map(a => {
+      const afOrders = orders.filter(o => o.afiliado === a.code);
+      const totalSales = afOrders.length;
+      const totalRevenue = afOrders.reduce((acc, o) => acc + parsePrice(o.valor), 0);
+      const commission = Math.round(totalRevenue * commRate);
+      return {
+        id: a.id,
+        nome: a.nome,
+        code: a.code,
+        foto_path: a.foto_path,
+        totalSales,
+        commission,
+        totalRevenue
+      };
+    });
+
+    // Ordenar por vendas decrescente, depois por comissão decrescente
+    ranking.sort((x, y) => y.totalSales - x.totalSales || y.commission - x.commission);
+    res.json(ranking);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Obter notificações do Afiliado (Afiliado)
+app.get('/api/affiliates/notifications', affiliateAuth, async (req, res) => {
+  const afId = req.affiliate.id;
+  try {
+    const [rows] = await pool.query(
+      `SELECT n.id, n.titulo, n.message, n.tipo, n.destinatario, n.date, 
+              IF(r.notification_id IS NULL, 0, 1) as lida 
+       FROM notifications n
+       LEFT JOIN notification_reads r ON n.id = r.notification_id AND r.affiliate_id = ?
+       WHERE n.destinatario = 'todos' OR n.destinatario = ?
+       ORDER BY n.date DESC, n.id DESC`,
+      [afId, afId]
+    );
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Marcar notificação do Afiliado como lida
+app.post('/api/affiliates/notifications/:id/read', affiliateAuth, async (req, res) => {
+  const afId = req.affiliate.id;
+  try {
+    await pool.query(
+      `INSERT INTO notification_reads (notification_id, affiliate_id, read_date) 
+       VALUES (?, ?, NOW()) 
+       ON DUPLICATE KEY UPDATE read_date = NOW()`,
+      [req.params.id, afId]
+    );
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });

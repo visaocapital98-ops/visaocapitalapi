@@ -40,7 +40,55 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage });
 
-// Servir ficheiros de upload via URL pública /uploads/<ficheiro>
+// Helper para guardar ficheiro na base de dados (LONGBLOB) para persistência permanente no Alwaysdata
+async function saveFileToDb(file) {
+  if (!file) return;
+  try {
+    const filePath = path.join(UPLOADS_DIR, file.filename);
+    const fileData = fs.readFileSync(filePath);
+    const date = new Date().toISOString().slice(0, 19).replace('T', ' ');
+    await pool.query(
+      'INSERT INTO stored_files (filename, mime_type, file_data, created_at) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE mime_type = ?, file_data = ?',
+      [file.filename, file.mimetype, fileData, date, file.mimetype, fileData]
+    );
+    console.log(`Ficheiro persistido na BD: ${file.filename}`);
+  } catch (err) {
+    console.error(`Erro ao guardar ficheiro na BD (${file.filename}):`, err);
+  }
+}
+
+// Servir ficheiros com fallback para a base de dados (evita perda de dados nos restarts do Railway)
+app.get('/uploads/:filename', async (req, res) => {
+  const filename = req.params.filename;
+  const filePath = path.join(UPLOADS_DIR, filename);
+
+  // Se já existe no disco, serve diretamente
+  if (fs.existsSync(filePath)) {
+    return res.sendFile(filePath);
+  }
+
+  // Se não existe no disco, procura na base de dados MySQL (Alwaysdata)
+  try {
+    const [rows] = await pool.query('SELECT mime_type, file_data FROM stored_files WHERE filename = ?', [filename]);
+    if (rows.length === 0) {
+      return res.status(404).send('Ficheiro não encontrado.');
+    }
+
+    const { mime_type, file_data } = rows[0];
+
+    // Grava de volta no disco para acelerar acessos futuros (cache local no contentor)
+    fs.writeFileSync(filePath, file_data);
+
+    // Servir o ficheiro para o cliente com o Content-Type correto
+    res.setHeader('Content-Type', mime_type);
+    return res.send(file_data);
+  } catch (err) {
+    console.error('Erro ao recuperar ficheiro da BD:', err);
+    return res.status(500).send('Erro interno ao recuperar ficheiro.');
+  }
+});
+
+// Fallback adicional para a pasta estática
 app.use('/uploads', express.static(UPLOADS_DIR));
 
 // Conexão Pool MySQL
@@ -253,6 +301,12 @@ app.post('/api/orders', upload.fields([
       );
     }
 
+    // Persistir comprovativo e ficheiros na base de dados para evitar perda de dados
+    await saveFileToDb(comprovativoFile);
+    for (const file of extraFiles) {
+      await saveFileToDb(file);
+    }
+
     res.json({ success: true, orderId });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -302,6 +356,11 @@ app.post('/api/affiliates/register', upload.single('foto'), async (req, res) => 
         paypay || null, fotoPath, hashedPassword, code, dateJoined
       ]
     );
+
+    // Persistir foto de perfil na base de dados
+    if (req.file) {
+      await saveFileToDb(req.file);
+    }
 
     res.json({ success: true, message: 'Registo efectuado com sucesso!' });
   } catch (err) {
@@ -517,6 +576,40 @@ app.post('/api/affiliates/withdraw', affiliateAuth, async (req, res) => {
     );
 
     res.json({ success: true, message: 'Pedido de levantamento enviado com sucesso!' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Atualizar perfil do Afiliado (incluindo alteração de foto de perfil)
+app.put('/api/affiliates/profile', affiliateAuth, upload.single('foto'), async (req, res) => {
+  const afId = req.affiliate.id;
+  const { nome, tel, endereco, banco_nome, banco, banco_titular, paypay } = req.body;
+  
+  if (!nome || !tel || !endereco) {
+    return res.status(400).json({ error: 'Nome, telefone e endereço são obrigatórios.' });
+  }
+
+  try {
+    let fotoPathQuery = '';
+    const queryParams = [nome, tel, endereco, banco_nome || null, banco || null, banco_titular || null, paypay || null];
+
+    if (req.file) {
+      const fotoPath = '/uploads/' + req.file.filename;
+      fotoPathQuery = ', foto_path = ?';
+      queryParams.push(fotoPath);
+      // Persistir no banco de dados
+      await saveFileToDb(req.file);
+    }
+
+    queryParams.push(afId);
+
+    await pool.query(
+      `UPDATE affiliates SET nome = ?, tel = ?, endereco = ?, banco_nome = ?, banco = ?, banco_titular = ?, paypay = ? ${fotoPathQuery} WHERE id = ?`,
+      queryParams
+    );
+
+    res.json({ success: true, message: 'Perfil atualizado com sucesso!' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

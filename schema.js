@@ -195,7 +195,16 @@ async function initializeDatabase() {
         FOREIGN KEY (affiliate_id) REFERENCES affiliates(id) ON DELETE CASCADE
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     `);
-    console.log('Tabela "notification_reads" verificada/criada.');
+    // 12. Tabela Stored Files (para persistência de uploads em banco de dados)
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS stored_files (
+        filename VARCHAR(255) PRIMARY KEY,
+        mime_type VARCHAR(100) NOT NULL,
+        file_data LONGBLOB NOT NULL,
+        created_at DATETIME NOT NULL
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    `);
+    console.log('Tabela "stored_files" verificada/criada.');
 
 
     // --- INSERÇÃO DE DADOS PADRÃO ---

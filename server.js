@@ -197,7 +197,7 @@ app.get('/api/reviews/approved', async (req, res) => {
 
 // Submeter uma avaliação
 app.post('/api/reviews', async (req, res) => {
-  const { name, stars, comment } = req.body;
+  const { name, stars, comment, visitor_id } = req.body;
   if (!name || !stars || !comment) {
     return res.status(400).json({ error: 'Campos obrigatórios em falta' });
   }
@@ -205,8 +205,8 @@ app.post('/api/reviews', async (req, res) => {
     const id = 'R' + Date.now();
     const date = new Date().toISOString().slice(0, 10);
     await pool.query(
-      'INSERT INTO reviews (id, name, stars, comment, date, aprovado) VALUES (?, ?, ?, ?, ?, 0)',
-      [id, name, stars, comment, date]
+      'INSERT INTO reviews (id, name, stars, comment, date, aprovado, visitor_id) VALUES (?, ?, ?, ?, ?, 0, ?)',
+      [id, name, stars, comment, date, visitor_id || null]
     );
     res.json({ success: true, message: 'Avaliação submetida, aguarda aprovação.' });
   } catch (err) {
@@ -225,6 +225,28 @@ app.get('/api/stats/public', async (req, res) => {
       total: total + 8,
       affiliates
     });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Registar visita ao site (Tempo real e analíticas)
+app.post('/api/visits', async (req, res) => {
+  const { visitor_id } = req.body;
+  if (!visitor_id) {
+    return res.status(400).json({ error: 'visitor_id é obrigatório' });
+  }
+
+  // Obter IP do utilizador (lidando com cabeçalhos de proxies se houver)
+  const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown';
+  const userAgent = req.headers['user-agent'] || 'unknown';
+  try {
+    // Registar a visita na BD
+    await pool.query(
+      'INSERT INTO site_visits (visitor_id, ip_address, user_agent, visit_time) VALUES (?, ?, ?, NOW())',
+      [visitor_id, ip.toString().split(',')[0].trim(), userAgent.substring(0, 255)]
+    );
+    res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -249,7 +271,7 @@ app.post('/api/orders', upload.fields([
   { name: 'comprovativo', maxCount: 1 },
   { name: 'ficheiros', maxCount: 10 }
 ]), async (req, res) => {
-  const { cliente_nome, cliente_tel, service_id, service_name, valor, afiliado } = req.body;
+  const { cliente_nome, cliente_tel, service_id, service_name, valor, afiliado, visitor_id } = req.body;
   
   if (!cliente_nome || !cliente_tel || !service_id || !service_name || !valor) {
     return res.status(400).json({ error: 'Campos obrigatórios em falta' });
@@ -271,7 +293,7 @@ app.post('/api/orders', upload.fields([
     const comprovativoName = comprovativoFile.originalname;
 
     // Extrair todos os campos do formulário (exceto os campos de controlo)
-    const camposExcluidos = ['cliente_nome','cliente_tel','service_id','service_name','valor','afiliado'];
+    const camposExcluidos = ['cliente_nome','cliente_tel','service_id','service_name','valor','afiliado','visitor_id'];
     const detalhesObj = {};
     for (const [key, val] of Object.entries(req.body)) {
       if (!camposExcluidos.includes(key) && val && val.toString().trim() !== '') {
@@ -283,12 +305,12 @@ app.post('/api/orders', upload.fields([
     // Inserir pedido com detalhes
     await pool.query(
       `INSERT INTO orders 
-      (id, date, date_time, cliente, contacto, servico, service_id, valor, afiliado, estado, detalhes, comprovativo_path, comprovativo_name) 
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'novo', ?, ?, ?)`,
+      (id, date, date_time, cliente, contacto, servico, service_id, valor, afiliado, estado, detalhes, comprovativo_path, comprovativo_name, visitor_id) 
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'novo', ?, ?, ?, ?)`,
       [
         orderId, date, dateTime, cliente_nome, cliente_tel, 
         service_name, service_id, valor, afiliado || null,
-        detalhesJSON, comprovativoPath, comprovativoName
+        detalhesJSON, comprovativoPath, comprovativoName, visitor_id || null
       ]
     );
 
@@ -619,6 +641,72 @@ app.put('/api/affiliates/profile', affiliateAuth, upload.single('foto'), async (
 // ==========================================
 // 3. PAINEL DE ADMINISTRAÇÃO (PROTEGIDO)
 // ==========================================
+
+// Obter estatísticas de tráfego e conversão em tempo real e histórica para o administrador
+app.get('/api/admin/traffic-stats', adminAuth, async (req, res) => {
+  try {
+    // 1. Visitantes ativos em tempo real (últimos 15 minutos)
+    const [[{ active_visitors }]] = await pool.query(
+      'SELECT COUNT(DISTINCT visitor_id) AS active_visitors FROM site_visits WHERE visit_time >= DATE_SUB(NOW(), INTERVAL 15 MINUTE)'
+    );
+
+    // Helper query para obter estatísticas agregadas por período
+    const getStatsForPeriod = async (intervalSql) => {
+      const sql = `
+        SELECT 
+          COUNT(DISTINCT v.visitor_id) AS total_visitors,
+          COUNT(DISTINCT CASE WHEN o.id IS NOT NULL THEN v.visitor_id END) AS ordered_visitors,
+          COUNT(DISTINCT CASE WHEN r.id IS NOT NULL THEN v.visitor_id END) AS reviewed_visitors,
+          COUNT(DISTINCT CASE WHEN o.id IS NULL AND r.id IS NULL THEN v.visitor_id END) AS only_visited_visitors
+        FROM site_visits v
+        LEFT JOIN orders o ON v.visitor_id = o.visitor_id
+        LEFT JOIN reviews r ON v.visitor_id = r.visitor_id
+        WHERE v.visit_time >= ${intervalSql}
+      `;
+      const [[result]] = await pool.query(sql);
+      return {
+        total_visitors: result.total_visitors || 0,
+        ordered_visitors: result.ordered_visitors || 0,
+        reviewed_visitors: result.reviewed_visitors || 0,
+        only_visited_visitors: result.only_visited_visitors || 0
+      };
+    };
+
+    const statsToday = await getStatsForPeriod('CURDATE()');
+    const stats7Days = await getStatsForPeriod('DATE_SUB(NOW(), INTERVAL 7 DAY)');
+    const statsMonth = await getStatsForPeriod('DATE_SUB(NOW(), INTERVAL 30 DAY)');
+    const statsYear = await getStatsForPeriod('DATE_SUB(NOW(), INTERVAL 365 DAY)');
+
+    // 2. Histórico diário dos últimos 7 dias (para gráfico/tabela)
+    const dailyHistorySql = `
+      SELECT 
+        DATE(v.visit_time) AS date,
+        COUNT(DISTINCT v.visitor_id) AS visitors,
+        COUNT(DISTINCT o.id) AS orders,
+        COUNT(DISTINCT r.id) AS reviews
+      FROM site_visits v
+      LEFT JOIN orders o ON v.visitor_id = o.visitor_id AND DATE(o.date_time) = DATE(v.visit_time)
+      LEFT JOIN reviews r ON v.visitor_id = r.visitor_id AND DATE(r.date) = DATE(v.visit_time)
+      WHERE v.visit_time >= DATE_SUB(CURDATE(), INTERVAL 6 DAY)
+      GROUP BY DATE(v.visit_time)
+      ORDER BY DATE(v.visit_time) ASC
+    `;
+    const [dailyHistory] = await pool.query(dailyHistorySql);
+
+    res.json({
+      active_visitors: active_visitors || 0,
+      periods: {
+        today: statsToday,
+        last7days: stats7Days,
+        month: statsMonth,
+        year: statsYear
+      },
+      daily_history: dailyHistory
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // Dashboard geral do Admin
 app.get('/api/admin/dashboard', adminAuth, async (req, res) => {

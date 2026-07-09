@@ -99,7 +99,14 @@ async function initializeDatabase() {
       console.log('Coluna "detalhes" adicionada à tabela orders.');
     } catch (e) {
       if (e.code !== 'ER_DUP_FIELDNAME') throw e;
-      // Coluna ja existe, ignorar
+    }
+
+    // Adicionar coluna visitor_id se ainda nao existir
+    try {
+      await connection.query(`ALTER TABLE orders ADD COLUMN visitor_id VARCHAR(50) DEFAULT NULL`);
+      console.log('Coluna "visitor_id" adicionada à tabela orders.');
+    } catch (e) {
+      if (e.code !== 'ER_DUP_FIELDNAME') throw e;
     }
 
     // 6. Tabela Order Files
@@ -126,6 +133,14 @@ async function initializeDatabase() {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     `);
     console.log('Tabela "reviews" verificada/criada.');
+
+    // Adicionar coluna visitor_id se ainda nao existir
+    try {
+      await connection.query(`ALTER TABLE reviews ADD COLUMN visitor_id VARCHAR(50) DEFAULT NULL`);
+      console.log('Coluna "visitor_id" adicionada à tabela reviews.');
+    } catch (e) {
+      if (e.code !== 'ER_DUP_FIELDNAME') throw e;
+    }
 
     // 8. Tabela Expenses
     await connection.query(`
@@ -205,6 +220,28 @@ async function initializeDatabase() {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     `);
     console.log('Tabela "stored_files" verificada/criada.');
+
+    // 13. Tabela Site Visits (para monitorização de visitas e conversão)
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS site_visits (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        visitor_id VARCHAR(50) NOT NULL,
+        ip_address VARCHAR(45) NOT NULL,
+        user_agent VARCHAR(255) NOT NULL,
+        visit_time DATETIME NOT NULL,
+        INDEX (visit_time),
+        INDEX (visitor_id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    `);
+    console.log('Tabela "site_visits" verificada/criada.');
+
+    // Adicionar coluna user_agent se não existir
+    try {
+      await connection.query(`ALTER TABLE site_visits ADD COLUMN user_agent VARCHAR(255) NOT NULL AFTER ip_address`);
+      console.log('Coluna "user_agent" adicionada à tabela site_visits.');
+    } catch (e) {
+      if (e.code !== 'ER_DUP_FIELDNAME') throw e;
+    }
 
 
     // --- INSERÇÃO DE DADOS PADRÃO ---

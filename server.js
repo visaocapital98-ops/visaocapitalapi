@@ -302,6 +302,17 @@ app.post('/api/orders', upload.fields([
     }
     const detalhesJSON = Object.keys(detalhesObj).length > 0 ? JSON.stringify(detalhesObj) : null;
 
+    let resolvedCode = null;
+    if (afiliado) {
+      const [afRows] = await pool.query(
+        'SELECT code FROM affiliates WHERE id = ? OR code = ?',
+        [afiliado.trim(), afiliado.trim()]
+      );
+      if (afRows.length > 0) {
+        resolvedCode = afRows[0].code;
+      }
+    }
+
     // Inserir pedido com detalhes
     await pool.query(
       `INSERT INTO orders 
@@ -309,7 +320,7 @@ app.post('/api/orders', upload.fields([
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'novo', ?, ?, ?, ?)`,
       [
         orderId, date, dateTime, cliente_nome, cliente_tel, 
-        service_name, service_id, valor, afiliado || null,
+        service_name, service_id, valor, resolvedCode,
         detalhesJSON, comprovativoPath, comprovativoName, visitor_id || null
       ]
     );

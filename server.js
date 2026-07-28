@@ -162,7 +162,7 @@ if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
   console.warn('Variáveis de e-mail SMTP em falta. As notificações por e-mail estão desativadas.');
 }
 
-async function sendOrderEmailNotification(order) {
+async function sendOrderEmailNotification(order, isConfirmed = false) {
   if (!mailTransporter) {
     console.warn(`[E-mail] Envio ignorado para o pedido ${order.id} (transporter não inicializado).`);
     return;
@@ -171,14 +171,26 @@ async function sendOrderEmailNotification(order) {
   const from = process.env.SMTP_FROM || `"Visão Capital" <${process.env.SMTP_USER}>`;
   const to = process.env.SMTP_TO || process.env.SMTP_USER;
 
+  const subject = isConfirmed 
+    ? `🚨 [Visão Capital] Novo Pagamento Confirmado - Pedido ${order.id}`
+    : `📝 [Visão Capital] Novo Pedido Solicitado - Pedido ${order.id}`;
+
+  const title = isConfirmed 
+    ? `Pagamento Confirmado com Sucesso!`
+    : `Novo Pedido Solicitado (Aguardando Aprovação)`;
+
+  const introText = isConfirmed
+    ? `O pagamento do seguinte pedido foi verificado e confirmado automaticamente pelo gateway de pagamentos:`
+    : `Um cliente efetuou uma nova solicitação de serviço no site. Por favor, analise os dados e o comprovativo de pagamento no painel administrativo:`;
+
   const mailOptions = {
     from: from,
     to: to,
-    subject: `🚨 [Visão Capital] Novo Pagamento Confirmado - Pedido ${order.id}`,
+    subject: subject,
     html: `
       <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #eee; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.05);">
-        <h2 style="color: #006400; margin-top: 0;">Venda Confirmada com Sucesso!</h2>
-        <p>O pagamento do seguinte pedido foi verificado e confirmado pelo gateway de pagamentos:</p>
+        <h2 style="color: ${isConfirmed ? '#006400' : '#d35400'}; margin-top: 0;">${title}</h2>
+        <p>${introText}</p>
         <table style="width: 100%; border-collapse: collapse; margin-top: 15px;">
           <tr>
             <td style="padding: 10px; border: 1px solid #ddd; background: #f9f9f9; font-weight: bold; width: 35%;">ID do Pedido:</td>
@@ -526,6 +538,19 @@ app.post('/api/orders', upload.fields([
     for (const file of extraFiles) {
       await saveFileToDb(file);
     }
+
+    // Enviar notificação de novo pedido por e-mail ao administrador
+    const newOrder = {
+      id: orderId,
+      servico: service_name,
+      cliente: cliente_nome,
+      contacto: cliente_tel,
+      valor: valor,
+      afiliado: resolvedCode
+    };
+    sendOrderEmailNotification(newOrder, false).catch(err => {
+      console.error('[E-mail] Erro assíncrono ao enviar notificação de novo pedido:', err.message);
+    });
 
     res.json({ success: true, orderId });
   } catch (err) {

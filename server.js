@@ -533,6 +533,35 @@ app.post('/api/orders', upload.fields([
   }
 });
 
+// Obter estado de um pedido público (por ID)
+app.get('/api/orders/:id/status', async (req, res) => {
+  try {
+    const [rows] = await pool.query('SELECT id, cliente, servico, estado FROM orders WHERE id = ?', [req.params.id.trim()]);
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'Pedido não encontrado' });
+    }
+    const order = rows[0];
+
+    // Mascarar o nome por privacidade (ex: "Paulo Calei" -> "P. Calei")
+    let maskedName = order.cliente;
+    const nameParts = order.cliente.split(' ').filter(p => p.trim() !== '');
+    if (nameParts.length > 1) {
+      maskedName = nameParts[0][0] + '. ' + nameParts[nameParts.length - 1];
+    } else if (nameParts.length === 1) {
+      maskedName = nameParts[0][0] + '...';
+    }
+
+    res.json({
+      id: order.id,
+      cliente: maskedName,
+      servico: order.servico,
+      estado: order.estado
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Registar como Afiliado
 app.post('/api/affiliates/register', upload.single('foto'), async (req, res) => {
   const { nome, idade, sexo, tel, email, endereco, banco_nome, banco, banco_titular, paypay, pass } = req.body;

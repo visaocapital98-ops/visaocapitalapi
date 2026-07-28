@@ -7,6 +7,8 @@ const path = require('path');
 const fs = require('fs');
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
+const stripe = process.env.STRIPE_SECRET_KEY ? require('stripe')(process.env.STRIPE_SECRET_KEY) : null;
+const nodemailer = require('nodemailer');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -19,7 +21,14 @@ const port = process.env.PORT || 3000;
 app.use(cors());
 app.options('*', cors()); // Responder a todos os preflight OPTIONS
 
-app.use(express.json({ limit: '50mb' }));
+app.use(express.json({ 
+  limit: '50mb',
+  verify: (req, res, buf) => {
+    if (req.originalUrl && req.originalUrl.startsWith('/api/webhooks/')) {
+      req.rawBody = buf;
+    }
+  }
+}));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // Garantir que a pasta uploads existe
@@ -132,6 +141,139 @@ function verifyToken(token) {
     return null;
   }
   return null;
+}
+
+// ============================================================
+// CONFIGURAÇÃO SMTP & ENVIOS DE E-MAIL
+// ============================================================
+let mailTransporter = null;
+if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
+  mailTransporter = nodemailer.createTransport({
+    host: process.env.SMTP_HOST,
+    port: parseInt(process.env.SMTP_PORT) || 587,
+    secure: process.env.SMTP_SECURE === 'true', // true para 465, false para outras portas
+    auth: {
+      user: process.env.SMTP_USER,
+      pass: process.env.SMTP_PASS
+    }
+  });
+  console.log('Transporter SMTP inicializado com sucesso.');
+} else {
+  console.warn('Variáveis de e-mail SMTP em falta. As notificações por e-mail estão desativadas.');
+}
+
+async function sendOrderEmailNotification(order) {
+  if (!mailTransporter) {
+    console.warn(`[E-mail] Envio ignorado para o pedido ${order.id} (transporter não inicializado).`);
+    return;
+  }
+
+  const from = process.env.SMTP_FROM || `"Visão Capital" <${process.env.SMTP_USER}>`;
+  const to = process.env.SMTP_TO || process.env.SMTP_USER;
+
+  const mailOptions = {
+    from: from,
+    to: to,
+    subject: `🚨 [Visão Capital] Novo Pagamento Confirmado - Pedido ${order.id}`,
+    html: `
+      <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #eee; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.05);">
+        <h2 style="color: #006400; margin-top: 0;">Venda Confirmada com Sucesso!</h2>
+        <p>O pagamento do seguinte pedido foi verificado e confirmado pelo gateway de pagamentos:</p>
+        <table style="width: 100%; border-collapse: collapse; margin-top: 15px;">
+          <tr>
+            <td style="padding: 10px; border: 1px solid #ddd; background: #f9f9f9; font-weight: bold; width: 35%;">ID do Pedido:</td>
+            <td style="padding: 10px; border: 1px solid #ddd; font-family: monospace; font-size: 1.05rem;">${order.id}</td>
+          </tr>
+          <tr>
+            <td style="padding: 10px; border: 1px solid #ddd; background: #f9f9f9; font-weight: bold;">Serviço/Produto:</td>
+            <td style="padding: 10px; border: 1px solid #ddd; font-weight: bold; color: #333;">${order.servico}</td>
+          </tr>
+          <tr>
+            <td style="padding: 10px; border: 1px solid #ddd; background: #f9f9f9; font-weight: bold;">Nome do Cliente:</td>
+            <td style="padding: 10px; border: 1px solid #ddd;">${order.cliente}</td>
+          </tr>
+          <tr>
+            <td style="padding: 10px; border: 1px solid #ddd; background: #f9f9f9; font-weight: bold;">Contacto do Cliente:</td>
+            <td style="padding: 10px; border: 1px solid #ddd;">${order.contacto}</td>
+          </tr>
+          <tr>
+            <td style="padding: 10px; border: 1px solid #ddd; background: #f9f9f9; font-weight: bold;">Valor do Serviço:</td>
+            <td style="padding: 10px; border: 1px solid #ddd; font-weight: bold; color: #006400;">${order.valor} Kz</td>
+          </tr>
+          <tr>
+            <td style="padding: 10px; border: 1px solid #ddd; background: #f9f9f9; font-weight: bold;">Afiliado Vinculado:</td>
+            <td style="padding: 10px; border: 1px solid #ddd; color: #856404; font-family: monospace;">${order.afiliado || 'Nenhum'}</td>
+          </tr>
+        </table>
+        <div style="margin-top: 20px; font-size: 0.85rem; color: #888; text-align: center;">
+          Este é um e-mail gerado automaticamente pelo sistema da Visão Capital.
+        </div>
+      </div>
+    `
+  };
+
+  try {
+    await mailTransporter.sendMail(mailOptions);
+    console.log(`[E-mail] Notificação enviada com sucesso para ${to} sobre o pedido ${order.id}.`);
+  } catch (err) {
+    console.error(`[E-mail] Erro ao enviar notificação para o pedido ${order.id}:`, err.message);
+  }
+}
+
+async function handleSuccessfulPayment(orderId, amount) {
+  try {
+    // 1. Procurar o pedido na base de dados
+    const [orders] = await pool.query('SELECT * FROM orders WHERE id = ?', [orderId]);
+    if (orders.length === 0) {
+      console.warn(`[Webhook] Pedido ${orderId} não encontrado no banco de dados.`);
+      return;
+    }
+
+    const order = orders[0];
+
+    // Se o pedido já estiver pago ou concluído, ignorar para evitar duplicar comissões/emails
+    if (order.estado === 'pago' || order.estado === 'concluido') {
+      console.log(`[Webhook] Pedido ${orderId} já se encontra com estado '${order.estado}'. Ignorado.`);
+      return;
+    }
+
+    // 2. Atualizar o estado do pedido para 'pago'
+    await pool.query('UPDATE orders SET estado = "pago" WHERE id = ?', [orderId]);
+    console.log(`[Webhook] Pedido ${orderId} atualizado para 'pago'.`);
+
+    // 3. Se houver um afiliado associado, atribuir comissão e notificar
+    if (order.afiliado) {
+      // Buscar o afiliado pelo código (a coluna orders.afiliado guarda o código canonical)
+      const [affiliates] = await pool.query('SELECT * FROM affiliates WHERE code = ?', [order.afiliado]);
+      if (affiliates.length > 0) {
+        const affiliate = affiliates[0];
+
+        // Obter taxa de comissão
+        const [setRows] = await pool.query('SELECT setting_value FROM settings WHERE setting_key = "commission"');
+        const commRate = parseInt(setRows[0]?.setting_value || '25') / 100;
+        const commissionAmount = Math.round(parsePrice(order.valor) * commRate);
+
+        // Criar notificação para o afiliado
+        const notifId = 'NT' + Date.now();
+        const today = new Date().toISOString().slice(0, 10);
+        const message = `🎉 Parabéns! A indicação do serviço "${order.servico}" do cliente ${order.cliente} foi confirmada e paga. Recebeu uma comissão de ${commissionAmount} Kz.`;
+
+        await pool.query(
+          'INSERT INTO notifications (id, titulo, message, tipo, destinatario, date) VALUES (?, ?, ?, ?, ?, ?)',
+          [notifId, 'Comissão Confirmada', message, 'geral', affiliate.id, today]
+        );
+        console.log(`[Webhook] Notificação de comissão criada para o afiliado ${affiliate.nome} (${affiliate.id}).`);
+      } else {
+        console.warn(`[Webhook] Afiliado com código ${order.afiliado} não encontrado para atribuir comissão.`);
+      }
+    }
+
+    // 4. Enviar notificação por e-mail à administração
+    await sendOrderEmailNotification(order);
+
+  } catch (err) {
+    console.error(`[Webhook] Erro no processamento do pagamento bem-sucedido do pedido ${orderId}:`, err);
+  }
 }
 
 // Middlewares de Autenticação
@@ -264,6 +406,51 @@ app.get('/api/settings', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// Webhook do Stripe para Confirmação de Pagamento
+app.post('/api/webhooks/payment', async (req, res) => {
+  const sig = req.headers['stripe-signature'];
+  const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
+
+  if (!stripe) {
+    console.error('[Webhook] Stripe SDK não inicializado (chave sk_live em falta).');
+    return res.status(500).json({ error: 'Stripe SDK not initialized' });
+  }
+
+  if (!sig || !endpointSecret) {
+    console.warn('[Webhook] Assinatura ou segredo do webhook em falta.');
+    return res.status(400).send('Webhook Error: Missing signature or secret');
+  }
+
+  let event;
+
+  try {
+    if (!req.rawBody) {
+      throw new Error('Raw body is empty or not parsed. Check express.json configuration.');
+    }
+    event = stripe.webhooks.constructEvent(req.rawBody, sig, endpointSecret);
+  } catch (err) {
+    console.error(`[Webhook] Falha na validação da assinatura: ${err.message}`);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+
+  console.log(`[Webhook] Evento recebido com sucesso: ${event.type}`);
+
+  if (event.type === 'checkout.session.completed' || event.type === 'payment_intent.succeeded') {
+    const object = event.data.object;
+    const orderId = object.metadata && object.metadata.orderId;
+    const amount = object.amount_total ? (object.amount_total / 100) : (object.amount ? (object.amount / 100) : 0);
+
+    if (orderId) {
+      console.log(`[Webhook] Processando pagamento com sucesso para o pedido: ${orderId}`);
+      await handleSuccessfulPayment(orderId, amount);
+    } else {
+      console.warn('[Webhook] Evento processado mas "orderId" não foi encontrado nos metadados.');
+    }
+  }
+
+  res.json({ received: true });
 });
 
 // Criar Pedido de Serviço (Com comprovativo e ficheiros opcionais)

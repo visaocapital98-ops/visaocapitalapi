@@ -1301,6 +1301,44 @@ app.put('/api/admin/settings', adminAuth, async (req, res) => {
   }
 });
 
+// Testar Webhook do Administrador
+app.post('/api/admin/settings/test-webhook', adminAuth, async (req, res) => {
+  try {
+    const [rows] = await pool.query('SELECT setting_value FROM settings WHERE setting_key = "webhook_url"');
+    const webhookUrl = rows[0]?.setting_value;
+
+    if (!webhookUrl || webhookUrl.trim() === '') {
+      return res.status(400).json({ error: 'Nenhuma URL de webhook configurada. Guarde a URL primeiro.' });
+    }
+
+    const payload = {
+      event: 'test.webhook',
+      timestamp: new Date().toISOString(),
+      data: {
+        message: "Este é um teste de integração de webhook bem-sucedido a partir do painel da Visão Capital! 🚀",
+        status: "active"
+      }
+    };
+
+    const response = await globalThis.fetch(webhookUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'User-Agent': 'VisaoCapital-WebhookTest/1.0'
+      },
+      body: JSON.stringify(payload)
+    });
+
+    res.json({
+      success: response.ok,
+      status: response.status,
+      statusText: response.statusText
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Atualizar Credenciais do Administrador
 app.put('/api/admin/credentials', adminAuth, async (req, res) => {
   const { user, pass } = req.body;

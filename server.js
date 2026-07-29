@@ -288,6 +288,47 @@ async function handleSuccessfulPayment(orderId, amount) {
   }
 }
 
+async function triggerAdminWebhook(order) {
+  try {
+    const [rows] = await pool.query('SELECT setting_value FROM settings WHERE setting_key = "webhook_url"');
+    const webhookUrl = rows[0]?.setting_value;
+
+    if (!webhookUrl || webhookUrl.trim() === '') {
+      console.log('[Webhook Admin] Nenhuma URL de webhook configurada. Ignorando.');
+      return;
+    }
+
+    console.log(`[Webhook Admin] Enviando notificação de novo pedido para: ${webhookUrl}`);
+
+    const payload = {
+      event: 'order.created',
+      timestamp: new Date().toISOString(),
+      data: {
+        id: order.id,
+        cliente: order.cliente,
+        contacto: order.contacto,
+        servico: order.servico,
+        valor: order.valor,
+        afiliado: order.afiliado || 'Nenhum',
+        estado: 'novo'
+      }
+    };
+
+    const res = await globalThis.fetch(webhookUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'User-Agent': 'VisaoCapital-Webhook/1.0'
+      },
+      body: JSON.stringify(payload)
+    });
+
+    console.log(`[Webhook Admin] Resposta do webhook (${res.status}): ${res.statusText}`);
+  } catch (err) {
+    console.error('[Webhook Admin] Erro ao disparar webhook de novo pedido:', err.message);
+  }
+}
+
 // Middlewares de Autenticação
 function adminAuth(req, res, next) {
   const token = req.headers['x-admin-token'] || (req.headers['authorization'] && req.headers['authorization'].split(' ')[1]);
@@ -550,6 +591,11 @@ app.post('/api/orders', upload.fields([
     };
     sendOrderEmailNotification(newOrder, false).catch(err => {
       console.error('[E-mail] Erro assíncrono ao enviar notificação de novo pedido:', err.message);
+    });
+
+    // Disparar o webhook de notificação para app externa do administrador
+    triggerAdminWebhook(newOrder).catch(err => {
+      console.error('[Webhook Admin] Erro assíncrono ao disparar webhook:', err.message);
     });
 
     res.json({ success: true, orderId });

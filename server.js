@@ -114,7 +114,7 @@ const dbConfig = {
 const pool = mysql.createPool(dbConfig);
 
 // Token-based Session Helpers (Zero dependencies)
-const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(32).toString('hex');
+const JWT_SECRET = process.env.JWT_SECRET || 'visaocapital_super_secret_session_key_2026';
 
 function generateToken(payload) {
   const data = JSON.stringify({ ...payload, exp: Date.now() + 24 * 60 * 60 * 1000 }); // 24 horas expiração

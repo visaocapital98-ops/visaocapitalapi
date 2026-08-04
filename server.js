@@ -333,6 +333,71 @@ async function triggerAdminWebhook(order) {
   }
 }
 
+async function validateReceiptWithGemini(fileBuffer, mimeType) {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey || apiKey.trim() === '') {
+    console.warn('[Gemini AI] GEMINI_API_KEY não configurada. Ignorando validação por IA.');
+    return { isReceipt: true, reason: 'Chave de API não configurada' };
+  }
+
+  try {
+    const base64Data = fileBuffer.toString('base64');
+    
+    const payload = {
+      contents: [
+        {
+          parts: [
+            {
+              inlineData: {
+                mimeType: mimeType,
+                data: base64Data
+              }
+            },
+            {
+              text: "Analise esta imagem. Trata-se de um comprovativo de transferência bancária, talão de depósito, recibo de pagamento ou e-mail/captura de ecrã de confirmação de pagamento legítimo? Responda estritamente em formato JSON válido, sem markdown, contendo apenas dois campos: \"is_receipt\" (booleano true se for um comprovativo e false se for qualquer outra imagem como selfies, capturas de ecrã aleatórias, memes, fotos pessoais, etc.) e \"confidence\" (número de 0 a 100). Exemplo: {\"is_receipt\": true, \"confidence\": 95}"
+            }
+          ]
+        }
+      ],
+      generationConfig: {
+        responseMimeType: "application/json"
+      }
+    };
+
+    const response = await globalThis.fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      }
+    );
+
+    if (!response.ok) {
+      console.error(`[Gemini AI] Erro na API do Gemini: ${response.status} ${response.statusText}`);
+      return { isReceipt: true, reason: 'Erro de ligação à API' };
+    }
+
+    const data = await response.json();
+    const jsonText = data.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!jsonText) {
+      return { isReceipt: true, reason: 'Resposta vazia da API' };
+    }
+
+    const parsed = JSON.parse(jsonText.trim());
+    console.log('[Gemini AI] Resultado da análise do talão:', parsed);
+
+    return {
+      isReceipt: parsed.is_receipt === true && parsed.confidence >= 70,
+      confidence: parsed.confidence,
+      reason: parsed.is_receipt ? 'Reconhecido como comprovativo' : 'Não reconhecido como comprovativo'
+    };
+  } catch (err) {
+    console.error('[Gemini AI] Erro ao validar comprovativo com IA:', err.message);
+    return { isReceipt: true, reason: 'Erro interno de processamento' };
+  }
+}
+
 // Middlewares de Autenticação
 function adminAuth(req, res, next) {
   const token = req.headers['x-admin-token'] || (req.headers['authorization'] && req.headers['authorization'].split(' ')[1]);
@@ -533,6 +598,15 @@ app.post('/api/orders', upload.fields([
   }
 
   try {
+    // 1. Validar comprovativo com Inteligência Artificial (Gemini)
+    const filePath = path.join(UPLOADS_DIR, comprovativoFile.filename);
+    const fileBuffer = await fs.promises.readFile(filePath);
+    const aiCheck = await validateReceiptWithGemini(fileBuffer, comprovativoFile.mimetype);
+    if (!aiCheck.isReceipt) {
+      fs.promises.unlink(filePath).catch(err => console.error('Erro ao apagar comprovativo inválido:', err.message));
+      return res.status(400).json({ error: 'O ficheiro enviado não foi reconhecido como um comprovativo de pagamento válido. Por favor, envie uma foto legível do talão de transferência ou PayPay.' });
+    }
+
     const orderId = 'PD' + Date.now();
     const date = new Date().toISOString().slice(0, 10);
     const dateTime = new Date().toISOString().slice(0, 19).replace('T', ' ');

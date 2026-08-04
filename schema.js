@@ -84,29 +84,28 @@ async function initializeDatabase() {
         service_id VARCHAR(50) NOT NULL,
         valor VARCHAR(100) NOT NULL,
         afiliado VARCHAR(50) DEFAULT NULL,
-        estado VARCHAR(20) NOT NULL DEFAULT 'novo',
-        observacoes TEXT DEFAULT NULL,
-        detalhes LONGTEXT DEFAULT NULL,
-        comprovativo_path VARCHAR(255) DEFAULT NULL,
-        comprovativo_name VARCHAR(255) DEFAULT NULL
+        estado VARCHAR(20) NOT NULL DEFAULT 'novo'
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     `);
     console.log('Tabela "orders" verificada/criada.');
 
-    // Adicionar coluna detalhes se ainda nao existir (para bases de dados ja existentes)
-    try {
-      await connection.query(`ALTER TABLE orders ADD COLUMN detalhes LONGTEXT DEFAULT NULL`);
-      console.log('Coluna "detalhes" adicionada à tabela orders.');
-    } catch (e) {
-      if (e.code !== 'ER_DUP_FIELDNAME') throw e;
-    }
+    // Adicionar colunas se ainda nao existirem (para bases de dados ja existentes)
+    const ordersColumns = [
+      { name: 'observacoes', type: 'TEXT DEFAULT NULL' },
+      { name: 'detalhes', type: 'LONGTEXT DEFAULT NULL' },
+      { name: 'comprovativo_path', type: 'VARCHAR(255) DEFAULT NULL' },
+      { name: 'comprovativo_name', type: 'VARCHAR(255) DEFAULT NULL' },
+      { name: 'visitor_id', type: 'VARCHAR(50) DEFAULT NULL' },
+      { name: 'ref_transacao', type: 'VARCHAR(100) DEFAULT NULL' }
+    ];
 
-    // Adicionar coluna visitor_id se ainda nao existir
-    try {
-      await connection.query(`ALTER TABLE orders ADD COLUMN visitor_id VARCHAR(50) DEFAULT NULL`);
-      console.log('Coluna "visitor_id" adicionada à tabela orders.');
-    } catch (e) {
-      if (e.code !== 'ER_DUP_FIELDNAME') throw e;
+    for (const col of ordersColumns) {
+      try {
+        await connection.query(`ALTER TABLE orders ADD COLUMN ${col.name} ${col.type}`);
+        console.log(`Coluna "${col.name}" adicionada à tabela orders.`);
+      } catch (e) {
+        if (e.code !== 'ER_DUP_FIELDNAME') throw e;
+      }
     }
 
     // 6. Tabela Order Files

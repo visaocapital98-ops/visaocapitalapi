@@ -213,6 +213,10 @@ async function sendOrderEmailNotification(order, isConfirmed = false) {
             <td style="padding: 10px; border: 1px solid #ddd; font-weight: bold; color: #006400;">${order.valor} Kz</td>
           </tr>
           <tr>
+            <td style="padding: 10px; border: 1px solid #ddd; background: #f9f9f9; font-weight: bold;">Ref. Transação:</td>
+            <td style="padding: 10px; border: 1px solid #ddd; font-family: monospace; font-weight: bold;">${order.ref_transacao || 'N/A'}</td>
+          </tr>
+          <tr>
             <td style="padding: 10px; border: 1px solid #ddd; background: #f9f9f9; font-weight: bold;">Afiliado Vinculado:</td>
             <td style="padding: 10px; border: 1px solid #ddd; color: #856404; font-family: monospace;">${order.afiliado || 'Nenhum'}</td>
           </tr>
@@ -511,10 +515,14 @@ app.post('/api/orders', upload.fields([
   { name: 'comprovativo', maxCount: 1 },
   { name: 'ficheiros', maxCount: 10 }
 ]), async (req, res) => {
-  const { cliente_nome, cliente_tel, service_id, service_name, valor, afiliado, visitor_id } = req.body;
+  const { cliente_nome, cliente_tel, service_id, service_name, valor, afiliado, visitor_id, ref_transacao } = req.body;
   
   if (!cliente_nome || !cliente_tel || !service_id || !service_name || !valor) {
     return res.status(400).json({ error: 'Campos obrigatórios em falta' });
+  }
+
+  if (!ref_transacao || ref_transacao.trim().length < 3) {
+    return res.status(400).json({ error: 'Por favor, insira o número de referência ou ID de transação válido' });
   }
 
   const comprovativoFile = req.files && req.files['comprovativo'] ? req.files['comprovativo'][0] : null;
@@ -533,7 +541,7 @@ app.post('/api/orders', upload.fields([
     const comprovativoName = comprovativoFile.originalname;
 
     // Extrair todos os campos do formulário (exceto os campos de controlo)
-    const camposExcluidos = ['cliente_nome','cliente_tel','service_id','service_name','valor','afiliado','visitor_id'];
+    const camposExcluidos = ['cliente_nome','cliente_tel','service_id','service_name','valor','afiliado','visitor_id','ref_transacao'];
     const detalhesObj = {};
     for (const [key, val] of Object.entries(req.body)) {
       if (!camposExcluidos.includes(key) && val && val.toString().trim() !== '') {
@@ -556,12 +564,12 @@ app.post('/api/orders', upload.fields([
     // Inserir pedido com detalhes
     await pool.query(
       `INSERT INTO orders 
-      (id, date, date_time, cliente, contacto, servico, service_id, valor, afiliado, estado, detalhes, comprovativo_path, comprovativo_name, visitor_id) 
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'novo', ?, ?, ?, ?)`,
+      (id, date, date_time, cliente, contacto, servico, service_id, valor, afiliado, estado, detalhes, comprovativo_path, comprovativo_name, visitor_id, ref_transacao) 
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'novo', ?, ?, ?, ?, ?)`,
       [
         orderId, date, dateTime, cliente_nome, cliente_tel, 
         service_name, service_id, valor, resolvedCode,
-        detalhesJSON, comprovativoPath, comprovativoName, visitor_id || null
+        detalhesJSON, comprovativoPath, comprovativoName, visitor_id || null, ref_transacao.trim()
       ]
     );
 
@@ -587,7 +595,8 @@ app.post('/api/orders', upload.fields([
       cliente: cliente_nome,
       contacto: cliente_tel,
       valor: valor,
-      afiliado: resolvedCode
+      afiliado: resolvedCode,
+      ref_transacao: ref_transacao.trim()
     };
     sendOrderEmailNotification(newOrder, false).catch(err => {
       console.error('[E-mail] Erro assíncrono ao enviar notificação de novo pedido:', err.message);

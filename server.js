@@ -334,8 +334,8 @@ async function triggerAdminWebhook(order) {
 }
 
 async function validateReceiptWithGemini(fileBuffer, mimeType) {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey || apiKey.trim() === '') {
+  const apiKey = process.env.GEMINI_API_KEY ? process.env.GEMINI_API_KEY.trim() : null;
+  if (!apiKey || apiKey === '') {
     console.warn('[Gemini AI] GEMINI_API_KEY não configurada. Ignorando validação por IA.');
     return { isReceipt: true, reason: 'Chave de API não configurada' };
   }
@@ -1331,7 +1331,7 @@ app.get('/api/admin/finances', adminAuth, async (req, res) => {
 
 // DEBUG GEMINI API
 app.get('/api/debug-gemini', async (req, res) => {
-  const key = process.env.GEMINI_API_KEY;
+  const key = process.env.GEMINI_API_KEY ? process.env.GEMINI_API_KEY.trim() : null;
   if (!key) {
     return res.json({ error: 'GEMINI_API_KEY is undefined' });
   }

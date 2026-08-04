@@ -1329,6 +1329,57 @@ app.get('/api/admin/finances', adminAuth, async (req, res) => {
   }
 });
 
+// DEBUG GEMINI API
+app.get('/api/debug-gemini', async (req, res) => {
+  const key = process.env.GEMINI_API_KEY;
+  if (!key) {
+    return res.json({ error: 'GEMINI_API_KEY is undefined' });
+  }
+
+  const maskedKey = key.slice(0, 8) + '...' + key.slice(-4);
+  
+  try {
+    const payload = {
+      contents: [{ parts: [{ text: "Responda apenas com a palavra: OK" }] }]
+    };
+
+    const response = await globalThis.fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${key}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      }
+    );
+
+    if (!response.ok) {
+      return res.json({
+        key_status: 'defined',
+        masked_key: maskedKey,
+        api_ok: false,
+        status: response.status,
+        statusText: response.statusText
+      });
+    }
+
+    const data = await response.json();
+    res.json({
+      key_status: 'defined',
+      masked_key: maskedKey,
+      api_ok: true,
+      data
+    });
+  } catch (err) {
+    res.json({
+      key_status: 'defined',
+      masked_key: maskedKey,
+      api_ok: false,
+      error: err.message,
+      stack: err.stack
+    });
+  }
+});
+
 // Registar Despesa (Saída Financeira)
 app.post('/api/admin/expenses', adminAuth, async (req, res) => {
   const { description, val } = req.body;

@@ -147,9 +147,14 @@ async function initializeDatabase() {
         id VARCHAR(50) PRIMARY KEY,
         description VARCHAR(255) NOT NULL,
         val DECIMAL(10,2) NOT NULL,
-        date DATE NOT NULL
+        date DATE NOT NULL,
+        expense_type ENUM('despesa','comissao') NOT NULL DEFAULT 'despesa'
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     `);
+    // Adicionar coluna expense_type caso tabela já exista sem ela
+    try {
+      await connection.query(`ALTER TABLE expenses ADD COLUMN expense_type ENUM('despesa','comissao') NOT NULL DEFAULT 'despesa'`);
+    } catch(e) { /* coluna já existe, ignorar */ }
     console.log('Tabela "expenses" verificada/criada.');
 
     // 9. Tabela Withdrawals

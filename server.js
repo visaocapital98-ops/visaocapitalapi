@@ -1272,7 +1272,7 @@ app.delete('/api/admin/reviews/:id', adminAuth, async (req, res) => {
 app.get('/api/admin/finances', adminAuth, async (req, res) => {
   try {
     const [orders] = await pool.query('SELECT id, date, cliente, servico, valor, afiliado, estado FROM orders');
-    const [expenses] = await pool.query('SELECT id, description, val, date FROM expenses ORDER BY date DESC');
+    const [expenses] = await pool.query('SELECT id, description, val, date, expense_type FROM expenses ORDER BY date DESC');
     const [withdrawals] = await pool.query('SELECT id, affiliate_id, amount, method, date, estado, banco_name, conta, titular, notes FROM withdrawals ORDER BY date DESC');
     const [afs] = await pool.query('SELECT code, nome, tel FROM affiliates');
     const [setRows] = await pool.query('SELECT setting_value FROM settings WHERE setting_key = "commission"');
@@ -1295,7 +1295,7 @@ app.get('/api/admin/finances', adminAuth, async (req, res) => {
     // Construir histórico de transações
     const txns = [
       ...completed.map(o => ({ id: o.id, date: o.date, desc: 'Serviço: ' + o.servico + ' – ' + o.cliente, tipo: 'entrada', val: parsePrice(o.valor) })),
-      ...expenses.map(e => ({ id: e.id, date: e.date, desc: e.description, tipo: 'saida', val: parseFloat(e.val) })),
+      ...expenses.map(e => ({ id: e.id, date: e.date, desc: e.description, tipo: 'saida', expense_type: e.expense_type || 'despesa', val: parseFloat(e.val) })),
       ...withdrawals.filter(w => w.estado === 'pago').map(w => {
         const af = afs.find(a => a.id === w.affiliate_id);
         return { id: w.id, date: w.date, desc: 'Comissão paga – ' + (af ? af.nome : 'Afiliado'), tipo: 'saida', val: parseFloat(w.amount) };
@@ -1331,16 +1331,17 @@ app.get('/api/admin/finances', adminAuth, async (req, res) => {
 
 // Registar Despesa (Saída Financeira)
 app.post('/api/admin/expenses', adminAuth, async (req, res) => {
-  const { description, val } = req.body;
+  const { description, val, expense_type } = req.body;
   if (!description || !val) {
     return res.status(400).json({ error: 'Descrição e valor obrigatórios' });
   }
+  const tipo = (expense_type === 'comissao') ? 'comissao' : 'despesa';
   try {
     const id = 'E' + Date.now();
     const date = new Date().toISOString().slice(0, 10);
     await pool.query(
-      'INSERT INTO expenses (id, description, val, date) VALUES (?, ?, ?, ?)',
-      [id, description, parseFloat(val), date]
+      'INSERT INTO expenses (id, description, val, date, expense_type) VALUES (?, ?, ?, ?, ?)',
+      [id, description, parseFloat(val), date, tipo]
     );
     res.json({ success: true });
   } catch (err) {

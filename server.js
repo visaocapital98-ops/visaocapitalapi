@@ -113,6 +113,16 @@ const dbConfig = {
 };
 const pool = mysql.createPool(dbConfig);
 
+// Auto-migração/Garantia de colunas essenciais
+(async () => {
+  try {
+    await pool.query("ALTER TABLE expenses ADD COLUMN expense_type ENUM('despesa','comissao') NOT NULL DEFAULT 'despesa'");
+    console.log('Auto-migração: Coluna expense_type verificada/adicionada.');
+  } catch (e) {
+    // Coluna já existe ou base de dados em processo de arranque
+  }
+})();
+
 // Token-based Session Helpers (Zero dependencies)
 const JWT_SECRET = process.env.JWT_SECRET || 'visaocapital_super_secret_session_key_2026';
 

@@ -153,6 +153,26 @@ function verifyToken(token) {
   return null;
 }
 
+// In-Memory Cache de Alta Performance (Reduz latência da BD para respostas instantâneas)
+const apiCache = new Map();
+
+function getCachedData(key) {
+  const cached = apiCache.get(key);
+  if (cached && Date.now() - cached.timestamp < cached.ttl) {
+    return cached.data;
+  }
+  return null;
+}
+
+function setCachedData(key, data, ttlMs = 60000) {
+  apiCache.set(key, { data, timestamp: Date.now(), ttl: ttlMs });
+}
+
+function clearCache(key) {
+  if (key) apiCache.delete(key);
+  else apiCache.clear();
+}
+
 // ============================================================
 // CONFIGURAÇÃO SMTP & ENVIOS DE E-MAIL
 // ============================================================
@@ -447,12 +467,15 @@ function parsePrice(val) {
 
 // Obter todos os serviços
 app.get('/api/services', async (req, res) => {
+  const cached = getCachedData('services');
+  if (cached) return res.json(cached);
   try {
     const [rows] = await pool.query('SELECT * FROM services');
     const services = rows.map(s => ({
       ...s,
       fields: JSON.parse(s.fields)
     }));
+    setCachedData('services', services, 120000); // 2 min cache
     res.json(services);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -461,8 +484,11 @@ app.get('/api/services', async (req, res) => {
 
 // Obter avaliações aprovadas
 app.get('/api/reviews/approved', async (req, res) => {
+  const cached = getCachedData('reviews_approved');
+  if (cached) return res.json(cached);
   try {
     const [rows] = await pool.query('SELECT * FROM reviews WHERE aprovado = 1 ORDER BY date DESC');
+    setCachedData('reviews_approved', rows, 60000); // 1 min cache
     res.json(rows);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -490,15 +516,25 @@ app.post('/api/reviews', async (req, res) => {
 
 // Obter estatísticas públicas do site
 app.get('/api/stats/public', async (req, res) => {
+  const cached = getCachedData('stats_public');
+  if (cached) return res.json(cached);
   try {
-    const [[{ count: completed }]] = await pool.query('SELECT COUNT(*) as count FROM orders WHERE estado = "concluido"');
-    const [[{ count: total }]] = await pool.query('SELECT COUNT(*) as count FROM orders');
-    const [[{ count: affiliates }]] = await pool.query('SELECT COUNT(*) as count FROM affiliates WHERE estado = "ativo"');
-    res.json({
+    const [
+      [[{ count: completed }]],
+      [[{ count: total }]],
+      [[{ count: affiliates }]]
+    ] = await Promise.all([
+      pool.query('SELECT COUNT(*) as count FROM orders WHERE estado = "concluido"'),
+      pool.query('SELECT COUNT(*) as count FROM orders'),
+      pool.query('SELECT COUNT(*) as count FROM affiliates WHERE estado = "ativo"')
+    ]);
+    const data = {
       completed: completed + 12,
       total: total + 8,
       affiliates
-    });
+    };
+    setCachedData('stats_public', data, 30000); // 30s cache
+    res.json(data);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -511,11 +547,9 @@ app.post('/api/visits', async (req, res) => {
     return res.status(400).json({ error: 'visitor_id é obrigatório' });
   }
 
-  // Obter IP do utilizador (lidando com cabeçalhos de proxies se houver)
   const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown';
   const userAgent = req.headers['user-agent'] || 'unknown';
   try {
-    // Registar a visita na BD
     await pool.query(
       'INSERT INTO site_visits (visitor_id, ip_address, user_agent, visit_time) VALUES (?, ?, ?, NOW())',
       [visitor_id, ip.toString().split(',')[0].trim(), userAgent.substring(0, 255)]
@@ -528,12 +562,15 @@ app.post('/api/visits', async (req, res) => {
 
 // Obter configurações públicas (WhatsApp, Email, Dados de pagamento)
 app.get('/api/settings', async (req, res) => {
+  const cached = getCachedData('settings');
+  if (cached) return res.json(cached);
   try {
     const [rows] = await pool.query('SELECT * FROM settings');
     const settings = {};
     rows.forEach(r => {
       settings[r.setting_key] = r.setting_value;
     });
+    setCachedData('settings', settings, 120000); // 2 min cache
     res.json(settings);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -1281,11 +1318,19 @@ app.delete('/api/admin/reviews/:id', adminAuth, async (req, res) => {
 // Obter Finanças (Admin)
 app.get('/api/admin/finances', adminAuth, async (req, res) => {
   try {
-    const [orders] = await pool.query('SELECT id, date, cliente, servico, valor, afiliado, estado FROM orders');
-    const [expenses] = await pool.query('SELECT id, description, val, date, expense_type FROM expenses ORDER BY date DESC');
-    const [withdrawals] = await pool.query('SELECT id, affiliate_id, amount, method, date, estado, banco_name, conta, titular, notes FROM withdrawals ORDER BY date DESC');
-    const [afs] = await pool.query('SELECT code, nome, tel FROM affiliates');
-    const [setRows] = await pool.query('SELECT setting_value FROM settings WHERE setting_key = "commission"');
+    const [
+      [orders],
+      [expenses],
+      [withdrawals],
+      [afs],
+      [setRows]
+    ] = await Promise.all([
+      pool.query('SELECT id, date, cliente, servico, valor, afiliado, estado FROM orders'),
+      pool.query('SELECT id, description, val, date, expense_type FROM expenses ORDER BY date DESC'),
+      pool.query('SELECT id, affiliate_id, amount, method, date, estado, banco_name, conta, titular, notes FROM withdrawals ORDER BY date DESC'),
+      pool.query('SELECT code, nome, tel FROM affiliates'),
+      pool.query('SELECT setting_value FROM settings WHERE setting_key = "commission"')
+    ]);
     const commRate = parseInt(setRows[0]?.setting_value || '25') / 100;
 
     const completed = orders.filter(o => o.estado === 'concluido');

@@ -113,13 +113,31 @@ const dbConfig = {
 };
 const pool = mysql.createPool(dbConfig);
 
-// Auto-migração/Garantia de colunas essenciais
+// Auto-migração/Garantia de tabelas e colunas essenciais
 (async () => {
   try {
     await pool.query("ALTER TABLE expenses ADD COLUMN expense_type ENUM('despesa','comissao') NOT NULL DEFAULT 'despesa'");
     console.log('Auto-migração: Coluna expense_type verificada/adicionada.');
   } catch (e) {
     // Coluna já existe ou base de dados em processo de arranque
+  }
+
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS service_views (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        service_id VARCHAR(50) NOT NULL,
+        visitor_id VARCHAR(50) DEFAULT NULL,
+        ip_address VARCHAR(45) DEFAULT NULL,
+        view_time DATETIME NOT NULL,
+        INDEX (service_id),
+        INDEX (view_time),
+        INDEX (visitor_id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    `);
+    console.log('Auto-migração: Tabela service_views verificada/criada.');
+  } catch (e) {
+    // Tabela já existe
   }
 })();
 
@@ -384,7 +402,11 @@ async function validateReceiptWithGemini(fileBuffer, mimeType) {
               }
             },
             {
-              text: "Analise esta imagem. Trata-se de um comprovativo de transferência bancária, talão de depósito, recibo de pagamento ou e-mail/captura de ecrã de confirmação de pagamento legítimo? Responda estritamente em formato JSON válido, sem markdown, contendo apenas dois campos: \"is_receipt\" (booleano true se for um comprovativo e false se for qualquer outra imagem como selfies, capturas de ecrã aleatórias, memes, fotos pessoais, etc.) e \"confidence\" (número de 0 a 100). Exemplo: {\"is_receipt\": true, \"confidence\": 95}"
+              text: "Analise rigorosamente esta imagem. O objetivo é verificar se se trata de um COMPROVATIVO DE PAGAMENTO OU TRANSFERÊNCIA BANCÁRIA REAL (como Talão de Multicaixa, Multicaixa Express, Comprovativo de Transferência Bancária via app ou internet banking - ex: BAI Directo, BIC, BFA, Banco Sol, BPC, etc. - talão de depósito bancário carimbado ou recibo oficial PayPay África).\n\n" +
+                    "CRITÉRIOS OBRIGATÓRIOS:\n" +
+                    "1. Deve apresentar elementos claros de uma transação bancária/financeira: montante/valor pago (geralmente em Kwanzas / Kz / Akz), data da operação e dados de identificação (número de transação, referência, conta de origem/destino ou IBAN).\n" +
+                    "2. NÃO É COMPROVATIVO: fotos pessoais, selfies, paisagens, animais, memes, faturas genéricas de compras online internacionais em dólares, capturas de ecrã de dashboards/painéis de administração, e-mails de registo/ativação de contas, capturas de ecrã de conversas de chat ou documentos de texto (currículos, certificados). Se for qualquer uma destas imagens, defina is_receipt como false.\n\n" +
+                    "Responda estritamente em formato JSON válido, contendo apenas dois campos: \"is_receipt\" (booleano true apenas se for comprovativo financeiro bancário válido e false caso contrário) e \"confidence\" (número de 0 a 100). Exemplo: {\"is_receipt\": true, \"confidence\": 95}"
             }
           ]
         }
@@ -418,7 +440,7 @@ async function validateReceiptWithGemini(fileBuffer, mimeType) {
     console.log('[Gemini AI] Resultado da análise do talão:', parsed);
 
     return {
-      isReceipt: parsed.is_receipt === true && parsed.confidence >= 70,
+      isReceipt: parsed.is_receipt === true && Number(parsed.confidence) >= 80,
       confidence: parsed.confidence,
       reason: parsed.is_receipt ? 'Reconhecido como comprovativo' : 'Não reconhecido como comprovativo'
     };
@@ -553,6 +575,26 @@ app.post('/api/visits', async (req, res) => {
     await pool.query(
       'INSERT INTO site_visits (visitor_id, ip_address, user_agent, visit_time) VALUES (?, ?, ?, NOW())',
       [visitor_id, ip.toString().split(',')[0].trim(), userAgent.substring(0, 255)]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Registar visualização do formulário de um produto/serviço
+app.post('/api/services/:id/view', async (req, res) => {
+  const serviceId = req.params.id;
+  const { visitor_id } = req.body || {};
+  if (!serviceId) {
+    return res.status(400).json({ error: 'service_id obrigatório' });
+  }
+
+  const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown';
+  try {
+    await pool.query(
+      'INSERT INTO service_views (service_id, visitor_id, ip_address, view_time) VALUES (?, ?, ?, NOW())',
+      [serviceId, visitor_id || null, ip.toString().split(',')[0].trim()]
     );
     res.json({ success: true });
   } catch (err) {
@@ -1069,6 +1111,92 @@ app.put('/api/affiliates/profile', affiliateAuth, upload.single('foto'), async (
 // ==========================================
 // 3. PAINEL DE ADMINISTRAÇÃO (PROTEGIDO)
 // ==========================================
+
+// Obter estatísticas detalhadas de produtos (visualizações de formulários, compras, conversão)
+app.get('/api/admin/products/stats', adminAuth, async (req, res) => {
+  try {
+    const [services] = await pool.query('SELECT id, name, price, icon, description FROM services');
+    
+    // 1. Total e únicos de visualizações de formulários por produto
+    const [viewRows] = await pool.query(`
+      SELECT 
+        service_id, 
+        COUNT(*) as total_views, 
+        COUNT(DISTINCT visitor_id) as unique_views
+      FROM service_views
+      GROUP BY service_id
+    `);
+
+    // 2. Pedidos e compras (concluídos) por produto
+    const [orderRows] = await pool.query(`
+      SELECT 
+        service_id,
+        servico,
+        COUNT(*) as total_orders,
+        COUNT(CASE WHEN estado = 'concluido' THEN 1 END) as completed_orders
+      FROM orders
+      GROUP BY service_id, servico
+    `);
+
+    const viewMap = new Map();
+    viewRows.forEach(v => viewMap.set(v.service_id, v));
+
+    const orderMap = new Map();
+    orderRows.forEach(o => {
+      const key = o.service_id || o.servico;
+      if (!orderMap.has(key)) {
+        orderMap.set(key, { total_orders: 0, completed_orders: 0 });
+      }
+      const existing = orderMap.get(key);
+      existing.total_orders += Number(o.total_orders || 0);
+      existing.completed_orders += Number(o.completed_orders || 0);
+    });
+
+    let overallViews = 0;
+    let overallOrders = 0;
+    let overallPurchases = 0;
+
+    const products = services.map(s => {
+      const v = viewMap.get(s.id) || { total_views: 0, unique_views: 0 };
+      const o = orderMap.get(s.id) || orderMap.get(s.name) || { total_orders: 0, completed_orders: 0 };
+
+      const views = Number(v.total_views || 0);
+      const uniqueViews = Number(v.unique_views || 0);
+      const ordersCount = Number(o.total_orders || 0);
+      const purchases = Number(o.completed_orders || 0);
+      const conversionRate = views > 0 ? Number(((purchases / views) * 100).toFixed(1)) : (purchases > 0 ? 100 : 0);
+
+      overallViews += views;
+      overallOrders += ordersCount;
+      overallPurchases += purchases;
+
+      return {
+        id: s.id,
+        name: s.name,
+        price: s.price,
+        icon: s.icon,
+        description: s.description,
+        views,
+        uniqueViews,
+        orders: ordersCount,
+        purchases,
+        conversionRate
+      };
+    });
+
+    res.json({
+      summary: {
+        totalViews: overallViews,
+        totalOrders: overallOrders,
+        totalPurchases: overallPurchases,
+        avgConversionRate: overallViews > 0 ? Number(((overallPurchases / overallViews) * 100).toFixed(1)) : 0
+      },
+      products
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // Obter estatísticas de tráfego e conversão em tempo real e histórica para o administrador
 app.get('/api/admin/traffic-stats', adminAuth, async (req, res) => {

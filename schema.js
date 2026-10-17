@@ -247,6 +247,21 @@ async function initializeDatabase() {
       if (e.code !== 'ER_DUP_FIELDNAME') throw e;
     }
 
+    // 14. Tabela Service Views (para estatísticas de visualizações de formulários de produtos)
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS service_views (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        service_id VARCHAR(50) NOT NULL,
+        visitor_id VARCHAR(50) DEFAULT NULL,
+        ip_address VARCHAR(45) DEFAULT NULL,
+        view_time DATETIME NOT NULL,
+        INDEX (service_id),
+        INDEX (view_time),
+        INDEX (visitor_id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    `);
+    console.log('Tabela "service_views" verificada/criada.');
+
 
     // --- INSERÇÃO DE DADOS PADRÃO ---
 

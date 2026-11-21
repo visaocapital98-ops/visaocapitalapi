@@ -669,42 +669,51 @@ app.post('/api/orders', upload.fields([
   { name: 'comprovativo', maxCount: 1 },
   { name: 'ficheiros', maxCount: 10 }
 ]), async (req, res) => {
-  const { cliente_nome, cliente_tel, service_id, service_name, valor, afiliado, visitor_id, ref_transacao } = req.body;
+  const { cliente_nome, cliente_tel, service_id, service_name, valor, afiliado, visitor_id, ref_transacao, payment_method } = req.body;
   
   if (!cliente_nome || !cliente_tel || !service_id || !service_name || !valor) {
     return res.status(400).json({ error: 'Campos obrigatórios em falta' });
   }
 
-  if (!ref_transacao || ref_transacao.trim().length < 3) {
-    return res.status(400).json({ error: 'Por favor, insira o número de referência ou ID de transação válido' });
-  }
+  const isExternalPayment = payment_method === 'kursinha' || service_id === 'trabalho_escolar';
 
   const comprovativoFile = req.files && req.files['comprovativo'] ? req.files['comprovativo'][0] : null;
   const extraFiles = req.files && req.files['ficheiros'] ? req.files['ficheiros'] : [];
 
-  if (!comprovativoFile) {
-    return res.status(400).json({ error: 'Falta o comprovativo de pagamento' });
+  if (!isExternalPayment) {
+    if (!ref_transacao || ref_transacao.trim().length < 3) {
+      return res.status(400).json({ error: 'Por favor, insira o número de referência ou ID de transação válido' });
+    }
+
+    if (!comprovativoFile) {
+      return res.status(400).json({ error: 'Falta o comprovativo de pagamento' });
+    }
+
+    try {
+      // 1. Validar comprovativo com Inteligência Artificial (Gemini)
+      const filePath = path.join(UPLOADS_DIR, comprovativoFile.filename);
+      const fileBuffer = await fs.promises.readFile(filePath);
+      const aiCheck = await validateReceiptWithGemini(fileBuffer, comprovativoFile.mimetype);
+      if (!aiCheck.isReceipt) {
+        fs.promises.unlink(filePath).catch(err => console.error('Erro ao apagar comprovativo inválido:', err.message));
+        return res.status(400).json({ error: 'O ficheiro enviado não foi reconhecido como um comprovativo de pagamento válido. Por favor, envie uma foto legível do talão de transferência ou PayPay.' });
+      }
+    } catch (err) {
+      console.error('[Gemini AI] Erro ao validar comprovativo:', err.message);
+    }
   }
 
   try {
-    // 1. Validar comprovativo com Inteligência Artificial (Gemini)
-    const filePath = path.join(UPLOADS_DIR, comprovativoFile.filename);
-    const fileBuffer = await fs.promises.readFile(filePath);
-    const aiCheck = await validateReceiptWithGemini(fileBuffer, comprovativoFile.mimetype);
-    if (!aiCheck.isReceipt) {
-      fs.promises.unlink(filePath).catch(err => console.error('Erro ao apagar comprovativo inválido:', err.message));
-      return res.status(400).json({ error: 'O ficheiro enviado não foi reconhecido como um comprovativo de pagamento válido. Por favor, envie uma foto legível do talão de transferência ou PayPay.' });
-    }
-
     const orderId = 'PD' + Date.now();
     const date = new Date().toISOString().slice(0, 10);
     const dateTime = new Date().toISOString().slice(0, 19).replace('T', ' ');
     
-    const comprovativoPath = '/uploads/' + comprovativoFile.filename;
-    const comprovativoName = comprovativoFile.originalname;
+    const comprovativoPath = comprovativoFile ? '/uploads/' + comprovativoFile.filename : null;
+    const comprovativoName = comprovativoFile ? comprovativoFile.originalname : (isExternalPayment ? 'Pagamento Kursinha (Sem talão manual)' : null);
+    const finalRef = (ref_transacao && ref_transacao.trim()) || (isExternalPayment ? 'Kursinha Checkout' : 'N/A');
 
     // Extrair todos os campos do formulário (exceto os campos de controlo)
-    const camposExcluidos = ['cliente_nome','cliente_tel','service_id','service_name','valor','afiliado','visitor_id','ref_transacao'];
+    const camposExcluidos = ['cliente_nome','cliente_tel','service_id','service_name','valor','afiliado','visitor_id','ref_transacao','payment_method'];
     const detalhesObj = {};
     for (const [key, val] of Object.entries(req.body)) {
       if (!camposExcluidos.includes(key) && val && val.toString().trim() !== '') {
@@ -732,7 +741,7 @@ app.post('/api/orders', upload.fields([
       [
         orderId, date, dateTime, cliente_nome, cliente_tel, 
         service_name, service_id, valor, resolvedCode,
-        detalhesJSON, comprovativoPath, comprovativoName, visitor_id || null, ref_transacao.trim()
+        detalhesJSON, comprovativoPath, comprovativoName, visitor_id || null, finalRef
       ]
     );
 
@@ -746,7 +755,9 @@ app.post('/api/orders', upload.fields([
     }
 
     // Persistir comprovativo e ficheiros na base de dados para evitar perda de dados
-    await saveFileToDb(comprovativoFile);
+    if (comprovativoFile) {
+      await saveFileToDb(comprovativoFile);
+    }
     for (const file of extraFiles) {
       await saveFileToDb(file);
     }
@@ -759,7 +770,7 @@ app.post('/api/orders', upload.fields([
       contacto: cliente_tel,
       valor: valor,
       afiliado: resolvedCode,
-      ref_transacao: ref_transacao.trim()
+      ref_transacao: finalRef
     };
     sendOrderEmailNotification(newOrder, false).catch(err => {
       console.error('[E-mail] Erro assíncrono ao enviar notificação de novo pedido:', err.message);
@@ -770,7 +781,11 @@ app.post('/api/orders', upload.fields([
       console.error('[Webhook Admin] Erro assíncrono ao disparar webhook:', err.message);
     });
 
-    res.json({ success: true, orderId });
+    res.json({
+      success: true,
+      orderId,
+      paymentUrl: isExternalPayment ? 'https://pay.kursinha.com/c/6b018e673496005732d4a2ec' : null
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

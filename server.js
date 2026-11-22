@@ -139,6 +139,26 @@ const pool = mysql.createPool(dbConfig);
   } catch (e) {
     // Tabela já existe
   }
+
+  // Garantir suporte a novos estados e fluxo de aprovação/solicitação
+  try {
+    await pool.query("ALTER TABLE orders MODIFY COLUMN estado VARCHAR(50) NOT NULL DEFAULT 'novo'");
+  } catch (e) {}
+
+  const orderWorkflowCols = [
+    { name: 'payment_status', type: "VARCHAR(30) NOT NULL DEFAULT 'unpaid'" },
+    { name: 'admin_approved', type: "TINYINT(1) NOT NULL DEFAULT 0" },
+    { name: 'approved_at', type: "DATETIME DEFAULT NULL" },
+    { name: 'paid_at', type: "DATETIME DEFAULT NULL" },
+    { name: 'financial_recorded', type: "TINYINT(1) NOT NULL DEFAULT 0" },
+    { name: 'order_type', type: "VARCHAR(30) NOT NULL DEFAULT 'standard'" }
+  ];
+  for (const col of orderWorkflowCols) {
+    try {
+      await pool.query(`ALTER TABLE orders ADD COLUMN ${col.name} ${col.type}`);
+    } catch (e) {}
+  }
+  console.log('Auto-migração: Colunas do fluxo de pedidos e aprovação verificadas/adicionadas.');
 })();
 
 // Token-based Session Helpers (Zero dependencies)
@@ -340,7 +360,7 @@ async function handleSuccessfulPayment(orderId, amount) {
   }
 }
 
-async function triggerAdminWebhook(order) {
+async function triggerAdminWebhook(order, eventType = 'order.created') {
   try {
     const [rows] = await pool.query('SELECT setting_value FROM settings WHERE setting_key = "webhook_url"');
     const webhookUrl = rows[0]?.setting_value;
@@ -350,19 +370,37 @@ async function triggerAdminWebhook(order) {
       return;
     }
 
-    console.log(`[Webhook Admin] Enviando notificação de novo pedido para: ${webhookUrl}`);
+    const isRequest = eventType === 'service_request_submitted' || order.order_type === 'request' || order.estado === 'request_submitted';
+
+    console.log(`[Webhook Admin] Enviando notificação (${eventType}) do pedido ${order.id} para: ${webhookUrl}`);
+
+    let detalhesParsed = {};
+    try {
+      detalhesParsed = typeof order.detalhes === 'string' ? JSON.parse(order.detalhes || '{}') : (order.detalhes || {});
+    } catch (e) {
+      detalhesParsed = {};
+    }
 
     const payload = {
-      event: 'order.created',
+      event: eventType,
       timestamp: new Date().toISOString(),
       data: {
         id: order.id,
+        tipo: isRequest ? 'solicitacao' : 'pedido_padrao',
+        is_sale: !isRequest && (order.financial_recorded === 1 || order.estado === 'pago' || order.estado === 'concluido'),
+        financeiro_contabilizado: order.financial_recorded === 1,
         cliente: order.cliente,
         contacto: order.contacto,
         servico: order.servico,
+        service_id: order.service_id,
         valor: order.valor,
         afiliado: order.afiliado || 'Nenhum',
-        estado: 'novo'
+        estado: order.estado,
+        payment_status: order.payment_status || (order.estado === 'pago' ? 'paid' : 'unpaid'),
+        admin_approved: order.admin_approved ? true : false,
+        checkout_url: order.checkout_url || (order.service_id === 'trabalho_escolar' ? 'https://pay.kursinha.com/c/6b018e673496005732d4a2ec' : null),
+        ref_transacao: order.ref_transacao || null,
+        detalhes: detalhesParsed
       }
     };
 
@@ -377,7 +415,70 @@ async function triggerAdminWebhook(order) {
 
     console.log(`[Webhook Admin] Resposta do webhook (${res.status}): ${res.statusText}`);
   } catch (err) {
-    console.error('[Webhook Admin] Erro ao disparar webhook de novo pedido:', err.message);
+    console.error('[Webhook Admin] Erro ao disparar webhook de pedido:', err.message);
+  }
+}
+
+async function checkAndApplyFinancialApproval(orderId) {
+  try {
+    const [rows] = await pool.query('SELECT * FROM orders WHERE id = ?', [orderId]);
+    if (rows.length === 0) return null;
+    const order = rows[0];
+
+    // Ambas as condições devem ser estritamente cumpridas:
+    // 1. Aprovado pelo administrador
+    // 2. Pagamento confirmado
+    const isApproved = order.admin_approved === 1 || ['approved', 'execucao', 'concluido'].includes(order.estado);
+    const isPaid = order.payment_status === 'paid' || ['pago', 'concluido'].includes(order.estado);
+
+    // Se já foi contabilizado anteriormente, previne duplicação (idempotência)
+    if (order.financial_recorded === 1) {
+      return { processed: false, alreadyRecorded: true, order };
+    }
+
+    if (isApproved && isPaid) {
+      // Definir novo estado compatível
+      const nextState = ['execucao', 'concluido'].includes(order.estado) ? order.estado : 'approved';
+
+      await pool.query(
+        'UPDATE orders SET financial_recorded = 1, estado = ? WHERE id = ?',
+        [nextState, orderId]
+      );
+      console.log(`[Financeiro] Pedido ${orderId} aprovado e pago! Registo financeiro ativado com sucesso.`);
+
+      // Atribuir comissão ao afiliado de forma definitiva (apenas uma vez)
+      if (order.afiliado) {
+        const [affiliates] = await pool.query('SELECT * FROM affiliates WHERE code = ?', [order.afiliado]);
+        if (affiliates.length > 0) {
+          const affiliate = affiliates[0];
+          const [setRows] = await pool.query('SELECT setting_value FROM settings WHERE setting_key = "commission"');
+          const commRate = parseInt(setRows[0]?.setting_value || '25') / 100;
+          const commissionAmount = Math.round(parsePrice(order.valor) * commRate);
+
+          const notifId = 'NT' + Date.now();
+          const today = new Date().toISOString().slice(0, 10);
+          const message = `🎉 Parabéns! A indicação do serviço "${order.servico}" do cliente ${order.cliente} foi aprovada e confirmada. Comissão creditada: ${commissionAmount} Kz.`;
+
+          await pool.query(
+            'INSERT INTO notifications (id, titulo, message, tipo, destinatario, date) VALUES (?, ?, ?, ?, ?, ?)',
+            [notifId, 'Comissão Confirmada', message, 'geral', affiliate.id, today]
+          );
+          console.log(`[Financeiro] Comissão de ${commissionAmount} Kz atribuída ao afiliado ${affiliate.nome} (${affiliate.id}).`);
+        }
+      }
+
+      // Notificação de venda definitiva via webhook
+      triggerAdminWebhook({ ...order, estado: nextState, financial_recorded: 1 }, 'order.sale_confirmed').catch(err => {
+        console.error('[Webhook Admin] Erro ao disparar webhook de venda confirmada:', err.message);
+      });
+
+      return { processed: true, bothConditionsMet: true };
+    }
+
+    return { processed: false, isApproved, isPaid, bothConditionsMet: false };
+  } catch (err) {
+    console.error(`[Financeiro] Erro ao verificar aprovação financeira do pedido ${orderId}:`, err);
+    throw err;
   }
 }
 
@@ -676,11 +777,18 @@ app.post('/api/orders', upload.fields([
   }
 
   const isExternalPayment = payment_method === 'kursinha' || service_id === 'trabalho_escolar';
+  const isRequest = service_id === 'trabalho_escolar' || req.body.order_type === 'request';
+
+  const orderType = isRequest ? 'request' : 'standard';
+  const initialState = isRequest ? 'request_submitted' : 'novo';
+  const paymentStatus = isRequest ? 'unpaid' : (isExternalPayment ? 'unpaid' : 'pending');
+  const adminApproved = 0;
+  const financialRecorded = 0;
 
   const comprovativoFile = req.files && req.files['comprovativo'] ? req.files['comprovativo'][0] : null;
   const extraFiles = req.files && req.files['ficheiros'] ? req.files['ficheiros'] : [];
 
-  if (!isExternalPayment) {
+  if (!isExternalPayment && !isRequest) {
     if (!ref_transacao || ref_transacao.trim().length < 3) {
       return res.status(400).json({ error: 'Por favor, insira o número de referência ou ID de transação válido' });
     }
@@ -713,7 +821,7 @@ app.post('/api/orders', upload.fields([
     const finalRef = (ref_transacao && ref_transacao.trim()) || (isExternalPayment ? 'Kursinha Checkout' : 'N/A');
 
     // Extrair todos os campos do formulário (exceto os campos de controlo)
-    const camposExcluidos = ['cliente_nome','cliente_tel','service_id','service_name','valor','afiliado','visitor_id','ref_transacao','payment_method'];
+    const camposExcluidos = ['cliente_nome','cliente_tel','service_id','service_name','valor','afiliado','visitor_id','ref_transacao','payment_method','order_type'];
     const detalhesObj = {};
     for (const [key, val] of Object.entries(req.body)) {
       if (!camposExcluidos.includes(key) && val && val.toString().trim() !== '') {
@@ -733,15 +841,16 @@ app.post('/api/orders', upload.fields([
       }
     }
 
-    // Inserir pedido com detalhes
+    // Inserir pedido com detalhes e novos campos de fluxo
     await pool.query(
       `INSERT INTO orders 
-      (id, date, date_time, cliente, contacto, servico, service_id, valor, afiliado, estado, detalhes, comprovativo_path, comprovativo_name, visitor_id, ref_transacao) 
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'novo', ?, ?, ?, ?, ?)`,
+      (id, date, date_time, cliente, contacto, servico, service_id, valor, afiliado, estado, detalhes, comprovativo_path, comprovativo_name, visitor_id, ref_transacao, order_type, payment_status, admin_approved, financial_recorded) 
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         orderId, date, dateTime, cliente_nome, cliente_tel, 
         service_name, service_id, valor, resolvedCode,
-        detalhesJSON, comprovativoPath, comprovativoName, visitor_id || null, finalRef
+        initialState, detalhesJSON, comprovativoPath, comprovativoName, visitor_id || null, finalRef,
+        orderType, paymentStatus, adminApproved, financialRecorded
       ]
     );
 
@@ -762,31 +871,93 @@ app.post('/api/orders', upload.fields([
       await saveFileToDb(file);
     }
 
-    // Enviar notificação de novo pedido por e-mail ao administrador
+    // Objeto do pedido construído
     const newOrder = {
       id: orderId,
       servico: service_name,
+      service_id: service_id,
       cliente: cliente_nome,
       contacto: cliente_tel,
       valor: valor,
       afiliado: resolvedCode,
-      ref_transacao: finalRef
+      ref_transacao: finalRef,
+      order_type: orderType,
+      estado: initialState,
+      payment_status: paymentStatus,
+      admin_approved: adminApproved,
+      financial_recorded: financialRecorded,
+      detalhes: detalhesObj,
+      checkout_url: isExternalPayment ? 'https://pay.kursinha.com/c/6b018e673496005732d4a2ec' : null
     };
+
+    // Enviar notificação de e-mail ao administrador (identificando claramente solicitações)
     sendOrderEmailNotification(newOrder, false).catch(err => {
       console.error('[E-mail] Erro assíncrono ao enviar notificação de novo pedido:', err.message);
     });
 
-    // Disparar o webhook de notificação para app externa do administrador
-    triggerAdminWebhook(newOrder).catch(err => {
+    // Disparar webhook: se for solicitação, dispara 'service_request_submitted' SEM contabilização financeira
+    const webhookEvent = isRequest ? 'service_request_submitted' : 'order.created';
+    triggerAdminWebhook(newOrder, webhookEvent).catch(err => {
       console.error('[Webhook Admin] Erro assíncrono ao disparar webhook:', err.message);
     });
 
     res.json({
       success: true,
       orderId,
+      order_type: orderType,
+      estado: initialState,
       paymentUrl: isExternalPayment ? 'https://pay.kursinha.com/c/6b018e673496005732d4a2ec' : null
     });
   } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Webhook Kursinha (Confirmação de Pagamento Externo de Trabalhos Escolares)
+app.post('/api/webhooks/kursinha', async (req, res) => {
+  try {
+    const { orderId, order_id, id, reference, status, event } = req.body || {};
+    const targetId = orderId || order_id || id || reference;
+
+    if (!targetId) {
+      return res.status(400).json({ error: 'Identificador do pedido não fornecido' });
+    }
+
+    const [orders] = await pool.query('SELECT * FROM orders WHERE id = ?', [targetId.trim()]);
+    if (orders.length === 0) {
+      console.warn(`[Kursinha Webhook] Pedido ${targetId} não encontrado.`);
+      return res.status(404).json({ error: 'Pedido não encontrado' });
+    }
+
+    const order = orders[0];
+    const isPaid = status === 'paid' || status === 'completed' || status === 'approved' || event === 'payment.succeeded' || event === 'checkout.completed';
+
+    if (isPaid) {
+      const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
+      await pool.query(
+        'UPDATE orders SET payment_status = "paid", paid_at = ?, ref_transacao = IF(ref_transacao IS NULL OR ref_transacao = "Kursinha Checkout", ?, ref_transacao) WHERE id = ?',
+        [now, req.body.transaction_id || req.body.payment_id || 'Kursinha Pago', targetId]
+      );
+      console.log(`[Kursinha Webhook] Pagamento confirmado para o pedido ${targetId}.`);
+
+      if (!order.admin_approved) {
+        await pool.query('UPDATE orders SET estado = "pending_admin_approval" WHERE id = ? AND estado = "request_submitted"', [targetId]);
+      }
+
+      // Ativar financeiro apenas se ambas as condições estiverem cumpridas
+      const finResult = await checkAndApplyFinancialApproval(targetId);
+
+      return res.json({
+        success: true,
+        orderId: targetId,
+        payment_status: 'paid',
+        financial_recorded: finResult?.bothConditionsMet || false
+      });
+    }
+
+    res.json({ received: true, orderId: targetId, status });
+  } catch (err) {
+    console.error('[Kursinha Webhook] Erro ao processar webhook:', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -988,13 +1159,13 @@ app.get('/api/affiliates/dashboard', affiliateAuth, async (req, res) => {
 
     // 3. Obter todas as vendas (pedidos associados)
     const [orders] = await pool.query(
-      'SELECT id, date, cliente, servico, valor, estado FROM orders WHERE afiliado = ? ORDER BY date_time DESC',
+      'SELECT id, date, cliente, servico, valor, estado, financial_recorded, payment_status, admin_approved, order_type FROM orders WHERE afiliado = ? ORDER BY date_time DESC',
       [afCode]
     );
 
-    // 4. Calcular estatísticas
-    const paidOrders = orders.filter(o => o.estado === 'concluido');
-    const pendingOrders = orders.filter(o => o.estado !== 'concluido');
+    // 4. Calcular estatísticas (Apenas pedidos confirmados financeira e administrativamente geram comissão definitiva)
+    const paidOrders = orders.filter(o => o.financial_recorded === 1 || o.estado === 'concluido');
+    const pendingOrders = orders.filter(o => !paidOrders.some(p => p.id === o.id) && !['rejeitado', 'rejected', 'cancelled'].includes(o.estado));
     
     const totalSales = orders.length;
     const paidSales = paidOrders.length;
@@ -1282,13 +1453,15 @@ app.get('/api/admin/traffic-stats', adminAuth, async (req, res) => {
 // Dashboard geral do Admin
 app.get('/api/admin/dashboard', adminAuth, async (req, res) => {
   try {
-    const [orders] = await pool.query('SELECT id, date, cliente, contacto, servico, valor, afiliado, estado, detalhes, comprovativo_path, comprovativo_name FROM orders ORDER BY date_time DESC');
+    const [orders] = await pool.query('SELECT id, date, cliente, contacto, servico, valor, afiliado, estado, detalhes, comprovativo_path, comprovativo_name, financial_recorded, payment_status, admin_approved, order_type FROM orders ORDER BY date_time DESC');
     const [afs] = await pool.query('SELECT id FROM affiliates');
     const [setRows] = await pool.query('SELECT setting_value FROM settings WHERE setting_key = "commission"');
     const commRate = parseInt(setRows[0]?.setting_value || '25') / 100;
 
-    const completed = orders.filter(o => o.estado === 'concluido');
-    const pending = orders.filter(o => ['novo', 'pendente'].includes(o.estado));
+    // Regra financeira: apenas pedidos com financial_recorded = 1 ou legados concluídos contam como receita
+    const completed = orders.filter(o => o.financial_recorded === 1 || o.estado === 'concluido');
+    const pending = orders.filter(o => !completed.some(c => c.id === o.id) && !['rejeitado', 'rejected', 'cancelled'].includes(o.estado));
+    const requests = orders.filter(o => o.order_type === 'request' || o.estado === 'request_submitted');
 
     const totalRevenue = completed.reduce((acc, o) => acc + parsePrice(o.valor), 0);
     const commissionsDue = completed.reduce((acc, o) => {
@@ -1301,6 +1474,7 @@ app.get('/api/admin/dashboard', adminAuth, async (req, res) => {
         totalOrders: orders.length,
         completedOrders: completed.length,
         pendingOrders: pending.length,
+        requestsCount: requests.length,
         totalRevenue,
         totalAffiliates: afs.length,
         commissionsDue
@@ -1340,7 +1514,116 @@ app.put('/api/admin/orders/:id', adminAuth, async (req, res) => {
       'UPDATE orders SET cliente = ?, servico = ?, valor = ?, estado = ?, observacoes = ? WHERE id = ?',
       [cliente, servico, valor, estado, observacoes, req.params.id]
     );
+
+    // Se o estado for alterado manualmente para pago ou concluído, avaliar ativação financeira
+    if (['pago', 'concluido', 'approved'].includes(estado)) {
+      await checkAndApplyFinancialApproval(req.params.id);
+    }
+
     res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Aprovar Solicitação Administrativamente (Admin)
+app.put('/api/admin/orders/:id/approve', adminAuth, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const [orders] = await pool.query('SELECT * FROM orders WHERE id = ?', [id]);
+    if (orders.length === 0) return res.status(404).json({ error: 'Pedido não encontrado' });
+
+    const order = orders[0];
+    const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
+
+    await pool.query(
+      'UPDATE orders SET admin_approved = 1, approved_at = ? WHERE id = ?',
+      [now, id]
+    );
+
+    // Avaliar ativação financeira (regra de dupla condição: aprovado + pagamento confirmado)
+    const finResult = await checkAndApplyFinancialApproval(id);
+
+    if (finResult && finResult.bothConditionsMet) {
+      return res.json({
+        success: true,
+        orderId: id,
+        admin_approved: true,
+        estado: 'approved',
+        financial_recorded: true,
+        message: 'Pedido aprovado e pagamento confirmado! Venda registada no financeiro.'
+      });
+    }
+
+    // Se o pagamento ainda não foi confirmado, fica em 'pending_payment'
+    const nextState = (order.payment_status === 'paid' || order.estado === 'pago') ? 'approved' : 'pending_payment';
+    await pool.query('UPDATE orders SET estado = ? WHERE id = ?', [nextState, id]);
+
+    res.json({
+      success: true,
+      orderId: id,
+      admin_approved: true,
+      estado: nextState,
+      financial_recorded: false,
+      message: 'Pedido aprovado administrativamente. Aguarda confirmação de pagamento para contabilização financeira.'
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Rejeitar Solicitação/Pedido (Admin)
+app.put('/api/admin/orders/:id/reject', adminAuth, async (req, res) => {
+  const { id } = req.params;
+  const { motivo } = req.body || {};
+  try {
+    await pool.query(
+      'UPDATE orders SET estado = "rejeitado", admin_approved = 0, observacoes = IF(? IS NOT NULL, CONCAT(COALESCE(observacoes, ""), " [Rejeitado: ", ?, "]"), observacoes) WHERE id = ?',
+      [motivo || null, motivo || null, id]
+    );
+
+    const [orders] = await pool.query('SELECT * FROM orders WHERE id = ?', [id]);
+    if (orders.length > 0) {
+      triggerAdminWebhook(orders[0], 'order.rejected').catch(() => {});
+    }
+
+    res.json({ success: true, orderId: id, estado: 'rejeitado', message: 'Pedido rejeitado. Nenhuma receita ou comissão foi atribuída.' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Confirmar Pagamento Manualmente / Pela Administração
+app.put('/api/admin/orders/:id/confirm-payment', adminAuth, async (req, res) => {
+  const { id } = req.params;
+  const { ref_transacao } = req.body || {};
+  try {
+    const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
+    await pool.query(
+      'UPDATE orders SET payment_status = "paid", paid_at = ?, ref_transacao = COALESCE(?, ref_transacao) WHERE id = ?',
+      [now, ref_transacao || null, id]
+    );
+
+    // Avaliar ativação financeira
+    const finResult = await checkAndApplyFinancialApproval(id);
+
+    const [orders] = await pool.query('SELECT * FROM orders WHERE id = ?', [id]);
+    const order = orders[0];
+
+    if (!order.admin_approved) {
+      await pool.query('UPDATE orders SET estado = "pending_admin_approval" WHERE id = ?', [id]);
+    }
+
+    res.json({
+      success: true,
+      orderId: id,
+      payment_status: 'paid',
+      admin_approved: !!order.admin_approved,
+      financial_recorded: finResult?.bothConditionsMet || false,
+      message: finResult?.bothConditionsMet 
+        ? 'Pagamento e aprovação confirmados! Venda contabilizada nas finanças.' 
+        : 'Pagamento confirmado! O pedido aguarda aprovação administrativa.'
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1468,7 +1751,7 @@ app.get('/api/admin/finances', adminAuth, async (req, res) => {
       [afs],
       [setRows]
     ] = await Promise.all([
-      pool.query('SELECT id, date, cliente, servico, valor, afiliado, estado FROM orders'),
+      pool.query('SELECT id, date, cliente, servico, valor, afiliado, estado, financial_recorded, payment_status, admin_approved, order_type FROM orders'),
       pool.query('SELECT id, description, val, date, expense_type FROM expenses ORDER BY date DESC'),
       pool.query('SELECT id, affiliate_id, amount, method, date, estado, banco_name, conta, titular, notes FROM withdrawals ORDER BY date DESC'),
       pool.query('SELECT code, nome, tel FROM affiliates'),
@@ -1476,14 +1759,21 @@ app.get('/api/admin/finances', adminAuth, async (req, res) => {
     ]);
     const commRate = parseInt(setRows[0]?.setting_value || '25') / 100;
 
-    const completed = orders.filter(o => o.estado === 'concluido');
-    const pending = orders.filter(o => ['novo', 'pago', 'pendente'].includes(o.estado));
+    // Regra estrita: apenas pedidos com financial_recorded = 1 ou legados concluídos contam como receita real
+    const completed = orders.filter(o => o.financial_recorded === 1 || o.estado === 'concluido');
+
+    // Pedidos pendentes de pagamento (excluindo solicitações cruas e pedidos rejeitados)
+    const pending = orders.filter(o => {
+      if (completed.some(c => c.id === o.id)) return false;
+      if (['rejeitado', 'rejected', 'cancelled', 'request_submitted'].includes(o.estado)) return false;
+      return ['novo', 'pago', 'pendente', 'pending_payment', 'pending_admin_approval'].includes(o.estado);
+    });
 
     const totalRevenue = completed.reduce((acc, o) => acc + parsePrice(o.valor), 0);
     const totalExpenses = expenses.reduce((acc, e) => acc + parseFloat(e.val), 0);
     const paidCommissions = withdrawals.filter(w => w.estado === 'pago').reduce((acc, w) => acc + parseFloat(w.amount), 0);
     
-    // Comissão pendente = Comissão total calculada - comissões pagas
+    // Comissão pendente = Comissão total calculada dos pedidos confirmados - comissões pagas
     const totalCommissionsCalculated = completed.filter(o => o.afiliado).reduce((acc, o) => acc + Math.round(parsePrice(o.valor) * commRate), 0);
     const pendingCommissions = Math.max(0, totalCommissionsCalculated - paidCommissions);
     

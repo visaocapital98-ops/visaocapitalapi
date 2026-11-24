@@ -770,13 +770,26 @@ app.post('/api/orders', upload.fields([
   { name: 'comprovativo', maxCount: 1 },
   { name: 'ficheiros', maxCount: 10 }
 ]), async (req, res) => {
-  const isExternalPayment = payment_method === 'kursinha' || service_id === 'trabalho_escolar';
-  const isRequest = service_id === 'trabalho_escolar' || req.body.order_type === 'request';
-  const orderValor = (valor && valor.trim() !== '') ? valor.trim() : (isRequest ? 'A partir de 1.500' : '');
+  try {
+    const { 
+      cliente_nome, 
+      cliente_tel, 
+      service_id, 
+      service_name, 
+      valor, 
+      afiliado, 
+      visitor_id, 
+      ref_transacao, 
+      payment_method 
+    } = req.body || {};
 
-  if (!cliente_nome || !cliente_tel || !service_id || !service_name || !orderValor) {
-    return res.status(400).json({ error: 'Campos obrigatórios em falta' });
-  }
+    const isExternalPayment = payment_method === 'kursinha' || service_id === 'trabalho_escolar';
+    const isRequest = service_id === 'trabalho_escolar' || (req.body && req.body.order_type === 'request');
+    const orderValor = (valor && valor.toString().trim() !== '') ? valor.toString().trim() : (isRequest ? 'A partir de 1.500' : '');
+
+    if (!cliente_nome || !cliente_tel || !service_id || !service_name || !orderValor) {
+      return res.status(400).json({ error: 'Campos obrigatórios em falta' });
+    }
 
   const orderType = isRequest ? 'request' : 'standard';
   const initialState = isRequest ? 'request_submitted' : 'novo';
@@ -810,8 +823,7 @@ app.post('/api/orders', upload.fields([
     }
   }
 
-  try {
-    const orderId = 'PD' + Date.now();
+  const orderId = 'PD' + Date.now();
     const date = new Date().toISOString().slice(0, 10);
     const dateTime = new Date().toISOString().slice(0, 19).replace('T', ' ');
     

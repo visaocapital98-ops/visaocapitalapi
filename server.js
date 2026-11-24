@@ -770,14 +770,13 @@ app.post('/api/orders', upload.fields([
   { name: 'comprovativo', maxCount: 1 },
   { name: 'ficheiros', maxCount: 10 }
 ]), async (req, res) => {
-  const { cliente_nome, cliente_tel, service_id, service_name, valor, afiliado, visitor_id, ref_transacao, payment_method } = req.body;
-  
-  if (!cliente_nome || !cliente_tel || !service_id || !service_name || !valor) {
-    return res.status(400).json({ error: 'Campos obrigatórios em falta' });
-  }
-
   const isExternalPayment = payment_method === 'kursinha' || service_id === 'trabalho_escolar';
   const isRequest = service_id === 'trabalho_escolar' || req.body.order_type === 'request';
+  const orderValor = (valor && valor.trim() !== '') ? valor.trim() : (isRequest ? 'A partir de 1.500' : '');
+
+  if (!cliente_nome || !cliente_tel || !service_id || !service_name || !orderValor) {
+    return res.status(400).json({ error: 'Campos obrigatórios em falta' });
+  }
 
   const orderType = isRequest ? 'request' : 'standard';
   const initialState = isRequest ? 'request_submitted' : 'novo';
@@ -848,11 +847,13 @@ app.post('/api/orders', upload.fields([
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         orderId, date, dateTime, cliente_nome, cliente_tel, 
-        service_name, service_id, valor, resolvedCode,
+        service_name, service_id, orderValor, resolvedCode,
         initialState, detalhesJSON, comprovativoPath, comprovativoName, visitor_id || null, finalRef,
         orderType, paymentStatus, adminApproved, financialRecorded
       ]
     );
+
+    console.log(`[Pedidos] Novo pedido/solicitação registado: ${orderId} (${service_name}) - Cliente: ${cliente_nome} - Estado: ${initialState}`);
 
     // Inserir ficheiros extras associados
     for (const file of extraFiles) {
